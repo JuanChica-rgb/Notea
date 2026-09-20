@@ -1,0 +1,6 @@
+{
+  "name": "Notea",
+  "description": "Plataforma académica de microaprendizaje, cuadernos interactivos estilo Notion y práctica gamificada con modos solitario y multijugador.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
