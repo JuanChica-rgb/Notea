@@ -1,9 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
-import { Plus, BookOpen, Gamepad2, X } from 'lucide-react';
+import { Plus, BookOpen, Gamepad2, GraduationCap, X } from 'lucide-react';
 
 export const FloatingCreateButton: React.FC = () => {
-  const { setCurrentView, setEditorContentType, setEditingCardId } = useApp();
+  const { user, setCurrentView, setEditorContentType, setEditingCardId, openAuthModal } = useApp();
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -19,13 +19,35 @@ export const FloatingCreateButton: React.FC = () => {
   }, []);
 
   const handleCreateMaterial = () => {
+    if (user.isGuest) {
+      openAuthModal('login');
+      setIsOpen(false);
+      return;
+    }
     setIsOpen(false);
     setEditingCardId(null);
     setEditorContentType('material');
     setCurrentView('editor');
   };
 
+  const handleOpenCourses = () => {
+    if (user.isGuest) {
+      openAuthModal('login');
+      setIsOpen(false);
+      return;
+    }
+    setIsOpen(false);
+    sessionStorage.setItem('notea_course_create', '1');
+    window.dispatchEvent(new Event('notea-course-create'));
+    setCurrentView('courses');
+  };
+
   const handleCreateGame = () => {
+    if (user.isGuest) {
+      openAuthModal('login');
+      setIsOpen(false);
+      return;
+    }
     setIsOpen(false);
     setEditingCardId(null);
     setEditorContentType('game');
@@ -56,8 +78,22 @@ export const FloatingCreateButton: React.FC = () => {
                 Material de Estudio / Cuaderno
               </h4>
               <p className="text-xs text-zinc-400 mt-0.5">
-                Fichas interactivas 3D, bloques Notion, mnemotecnias y repaso guiado.
+                Cuaderno para estudiar y publicar en un curso.
               </p>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleOpenCourses}
+            className="w-full p-3 rounded-xl hover:bg-zinc-800/80 transition-colors flex items-start gap-3 text-left group"
+          >
+            <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400 group-hover:bg-sky-500/20 group-hover:text-sky-300 transition-colors">
+              <GraduationCap className="w-5 h-5" />
+            </div>
+            <div>
+              <h4 className="text-sm font-semibold text-zinc-100 group-hover:text-sky-300">Curso</h4>
+              <p className="text-xs text-zinc-400 mt-0.5">Un espacio con código para tu materia, avisos y cuadernos.</p>
             </div>
           </button>
 
@@ -72,10 +108,10 @@ export const FloatingCreateButton: React.FC = () => {
             </div>
             <div>
               <h4 className="text-sm font-semibold text-zinc-100 group-hover:text-purple-300">
-                Juego Competitivo / Ráfaga
+                Juego
               </h4>
               <p className="text-xs text-zinc-400 mt-0.5">
-                Prueba contra el reloj, duelos 1v1 y salas con bono de velocidad.
+                Para el muro del curso o para jugar en clase.
               </p>
             </div>
           </button>
@@ -85,7 +121,13 @@ export const FloatingCreateButton: React.FC = () => {
       {/* Main Floating "+" Button */}
       <button
         type="button"
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={() => {
+          if (user.isGuest) {
+            openAuthModal('login');
+            return;
+          }
+          setIsOpen(!isOpen);
+        }}
         className={`w-14 h-14 rounded-full shadow-2xl flex items-center justify-center transition-transform duration-200 focus:outline-none ${
           isOpen
             ? 'bg-zinc-800 text-zinc-200 rotate-45 border border-zinc-700'

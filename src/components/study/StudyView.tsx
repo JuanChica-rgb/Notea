@@ -3,14 +3,17 @@ import { useApp } from '../../context/AppContext';
 import { InteractiveBlockPlayer } from '../editor/blocks/InteractiveBlockPlayer';
 import { ArrowLeft, Clock, Award, CheckCircle2, RotateCcw, Trophy, Sparkles } from 'lucide-react';
 import confetti from 'canvas-confetti';
+import { getActivityMaxPoints } from '../../utils/scoring';
+import { rememberPractice } from '../../lib/review';
+import { isPracticeBlock } from '../../utils/review';
 
 export const StudyView: React.FC = () => {
   const { 
     activeCardId, 
     cards, 
+    user,
     setCurrentView, 
-    updateUserRP, 
-    showToast 
+    showToast,
   } = useApp();
 
   const card = cards.find(c => c.id === activeCardId) || cards[0];
@@ -18,7 +21,8 @@ export const StudyView: React.FC = () => {
   const [currentBlockIndex, setCurrentBlockIndex] = useState(0);
   const [seconds, setSeconds] = useState(0);
   const [isFinished, setIsFinished] = useState(false);
-  const [completedBlocks, setCompletedBlocks] = useState<{ isCorrect: boolean; points: number }[]>([]);
+  const [completedBlocks, setCompletedBlocks] = useState<{ isCorrect: boolean; points: number; maxPoints: number }[]>([]);
+  const [validatedResult, setValidatedResult] = useState<{ isCorrect: boolean; points: number; maxPoints: number } | null>(null);
 
   // Stopwatch timer
   useEffect(() => {
@@ -32,28 +36,39 @@ export const StudyView: React.FC = () => {
   const blocks = card?.blocks || [];
   const currentBlock = blocks[currentBlockIndex];
 
-  const handleBlockComplete = (isCorrect: boolean, points: number) => {
-    const updated = [...completedBlocks, { isCorrect, points }];
-    setCompletedBlocks(updated);
+  const handleBlockComplete = (isCorrect: boolean, points: number, maxPoints = 0) => {
+    if (validatedResult) return;
+    setValidatedResult({ isCorrect, points, maxPoints });
+  };
 
+  const handleNextBlock = () => {
+    const result = validatedResult ?? { isCorrect: true, points: 0, maxPoints: 0 };
+    if (!user.isGuest && card && currentBlock && isPracticeBlock(currentBlock)) {
+      void rememberPractice({
+        cardId: card.id,
+        blockId: currentBlock.id,
+        subjectName: card.subjectName,
+        correct: result.isCorrect,
+        username: user.username,
+        fullName: user.fullName,
+        isIncognito: user.isIncognito,
+      }).catch(() => undefined);
+    }
+    const updated = [...completedBlocks, result];
+    setCompletedBlocks(updated);
+    setValidatedResult(null);
     if (currentBlockIndex + 1 < blocks.length) {
       setCurrentBlockIndex(prev => prev + 1);
     } else {
       // Session finished
       setIsFinished(true);
 
-      // Calculate accuracy & RP
-      const correctCount = updated.filter(b => b.isCorrect).length;
-      const totalPoints = updated.reduce((acc, cur) => acc + cur.points, 0);
-      const earnedRP = Math.max(15, Math.round(totalPoints / 5));
-
-      updateUserRP(earnedRP);
       confetti({
         particleCount: 80,
         spread: 70,
         origin: { y: 0.6 }
       });
-      showToast(`¡Sesión completada! Ganaste +${earnedRP} RP`);
+      showToast('¡Sesión de estudio completada!');
     }
   };
 
@@ -68,6 +83,7 @@ export const StudyView: React.FC = () => {
     setSeconds(0);
     setIsFinished(false);
     setCompletedBlocks([]);
+    setValidatedResult(null);
   };
 
   if (!card) {
@@ -75,17 +91,19 @@ export const StudyView: React.FC = () => {
       <div className="p-8 text-center text-zinc-400">
         <p>No se encontró el contenido seleccionado.</p>
         <button
-          onClick={() => setCurrentView('library')}
+          onClick={() => setCurrentView(user.isGuest ? 'content_preview' : 'library')}
           className="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs"
         >
-          Volver a la Biblioteca
+              {user.isGuest ? 'Volver' : 'Volver a la Biblioteca'}
         </button>
       </div>
     );
   }
 
-  const accuracyPercent = completedBlocks.length > 0
-    ? Math.round((completedBlocks.filter(b => b.isCorrect).length / completedBlocks.length) * 100)
+  const earnedPoints = completedBlocks.reduce((acc, cur) => acc + cur.points, 0);
+  const maxPoints = getActivityMaxPoints(blocks, false);
+  const accuracyPercent = maxPoints > 0
+    ? Math.round((earnedPoints / maxPoints) * 100)
     : 100;
 
   return (
@@ -94,7 +112,7 @@ export const StudyView: React.FC = () => {
       <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
         <button
           type="button"
-          onClick={() => setCurrentView('library')}
+          onClick={() => setCurrentView(user.isGuest ? 'content_preview' : 'library')}
           className="flex items-center gap-1.5 text-xs font-semibold text-zinc-400 hover:text-zinc-200"
         >
           <ArrowLeft className="w-4 h-4" />
@@ -119,7 +137,7 @@ export const StudyView: React.FC = () => {
       <div className="p-4 bg-zinc-900/60 border border-zinc-800 rounded-2xl flex items-center justify-between">
         <div>
           <span className="text-[11px] font-bold text-indigo-400 uppercase tracking-wider">
-            {card.subjectName} • {card.semester}.° Semestre
+            {card.subjectName}
           </span>
           <h1 className="text-xl font-bold font-display text-zinc-100 mt-0.5">
             {card.title}
@@ -134,22 +152,13 @@ export const StudyView: React.FC = () => {
       {!isFinished && currentBlock ? (
         <div className="space-y-4">
           <InteractiveBlockPlayer
+            key={currentBlock.id}
             block={currentBlock}
             onComplete={handleBlockComplete}
+            onNext={handleNextBlock}
+            nextLabel={currentBlockIndex + 1 < blocks.length ? 'Siguiente bloque' : 'Finalizar estudio'}
             isGameMode={false}
           />
-
-          {/* Manual Skip / Next block button if user wants to proceed */}
-          <div className="flex justify-between items-center pt-2 text-xs text-zinc-500">
-            <span>Practica a tu propio ritmo</span>
-            <button
-              type="button"
-              onClick={() => handleBlockComplete(true, 50)}
-              className="text-indigo-400 hover:text-indigo-300 font-semibold"
-            >
-              Siguiente Bloque →
-            </button>
-          </div>
         </div>
       ) : (
         /* Final Statistics Screen */
@@ -166,7 +175,7 @@ export const StudyView: React.FC = () => {
               Excelente Trabajo
             </h2>
             <p className="text-sm text-zinc-400 max-w-md mx-auto mt-1">
-              Has revisado los conceptos clave de {card.title}. Tus estadísticas han sido registradas para el ranking.
+              Has revisado los conceptos clave de {card.title}. Si este material está en un curso, tu precisión queda en el ranking de ese curso.
             </p>
           </div>
 
@@ -198,11 +207,12 @@ export const StudyView: React.FC = () => {
             <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl">
               <span className="text-xs font-semibold text-zinc-400 flex items-center justify-center gap-1">
                 <Award className="w-3.5 h-3.5 text-amber-400" />
-                Puntos de Liga
+                Puntos de estudio
               </span>
               <span className="text-2xl font-black font-mono text-amber-400 mt-1 block">
-                +{Math.max(15, Math.round((completedBlocks.length * 10)))} RP
+                {earnedPoints} / {maxPoints}
               </span>
+              <span className="text-[10px] text-zinc-500 mt-1 block">Máximo posible: {maxPoints}</span>
             </div>
           </div>
 
@@ -219,20 +229,12 @@ export const StudyView: React.FC = () => {
 
             <button
               type="button"
-              onClick={() => setCurrentView('library')}
+              onClick={() => setCurrentView(user.isGuest ? 'content_preview' : 'library')}
               className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl shadow-lg shadow-indigo-600/25 transition-all"
             >
-              Ir a Mi Biblioteca
+              {user.isGuest ? 'Volver al material' : 'Ir a Mi Biblioteca'}
             </button>
 
-            <button
-              type="button"
-              onClick={() => setCurrentView('rankings')}
-              className="px-5 py-2.5 bg-purple-950/60 hover:bg-purple-900/60 border border-purple-800/80 text-purple-300 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors"
-            >
-              <Trophy className="w-3.5 h-3.5" />
-              Ver Rankings
-            </button>
           </div>
         </div>
       )}

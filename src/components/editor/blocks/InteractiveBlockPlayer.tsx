@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { 
   InteractiveBlock, 
   FlashcardBlockData, 
@@ -17,103 +17,230 @@ import {
   Check, 
   X, 
   ArrowUp, 
-  ArrowDown, 
+  ArrowDown,
+  GripVertical, 
   CheckCircle2, 
   AlertCircle, 
-  HelpCircle,
   Sparkles,
-  ArrowRight
+  ArrowRight,
+  RotateCcw
 } from 'lucide-react';
+import { getBlockMaxPoints, scorePartial } from '../../../utils/scoring';
+import { MathText } from '../../common/MathText';
 
 interface InteractiveBlockPlayerProps {
   block: InteractiveBlock;
-  onComplete?: (isCorrect: boolean, points: number) => void;
+  onComplete?: (isCorrect: boolean, points: number, maxPoints?: number) => void;
+  onNext?: () => void;
+  nextLabel?: string;
   isGameMode?: boolean;
 }
+
+const BlockActions: React.FC<{
+  requiresCheck: boolean;
+  canCheck?: boolean;
+  checked?: boolean;
+  isCorrect?: boolean | null;
+  onCheck?: () => void;
+  onNext?: () => void;
+  nextLabel?: string;
+  checkLabel?: string;
+  canAdvance?: boolean;
+}> = ({
+  requiresCheck,
+  canCheck = true,
+  checked = false,
+  isCorrect = null,
+  onCheck,
+  onNext,
+  nextLabel = 'Siguiente bloque',
+  checkLabel = 'Comprobar',
+  canAdvance,
+}) => (
+  <div className="flex flex-col sm:flex-row sm:items-center gap-2 pt-3 border-t border-zinc-800/80">
+    {checked && isCorrect !== null && (
+      <span className={`sm:mr-auto text-xs font-bold flex items-center gap-1.5 ${isCorrect ? 'text-emerald-400' : 'text-rose-400'}`}>
+        {isCorrect ? <CheckCircle2 className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+        {isCorrect ? 'Correcto' : 'Incorrecto'}
+      </span>
+    )}
+    {requiresCheck && (
+      <button
+        type="button"
+        onClick={onCheck}
+        disabled={!canCheck || checked}
+        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-1.5"
+      >
+        <Check className="w-4 h-4" />
+        {checked ? 'Comprobado' : checkLabel}
+      </button>
+    )}
+    {onNext && (
+      <button
+        type="button"
+        onClick={onNext}
+        disabled={requiresCheck && !(canAdvance ?? checked)}
+        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-1.5"
+      >
+        {nextLabel}
+        <ArrowRight className="w-4 h-4" />
+      </button>
+    )}
+  </div>
+);
+
+type PlayerNav = {
+  onComplete?: (correctItems: number, totalItems: number) => void;
+  onNext?: () => void;
+  nextLabel?: string;
+};
 
 export const InteractiveBlockPlayer: React.FC<InteractiveBlockPlayerProps> = ({
   block,
   onComplete,
+  onNext,
+  nextLabel = 'Siguiente bloque',
   isGameMode = false
 }) => {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    setElapsedSeconds(0);
+    const timeLimit = block.type !== 'content_card' && block.estimatedTimeSeconds && block.estimatedTimeSeconds > 0 ? block.estimatedTimeSeconds : 0;
+    if (!isGameMode || timeLimit <= 0) return;
+    const interval = window.setInterval(() => setElapsedSeconds(value => value + 1), 1000);
+    return () => window.clearInterval(interval);
+  }, [block.id, block.estimatedTimeSeconds, isGameMode]);
+
+  const timeLimit = block.type !== 'content_card' && block.estimatedTimeSeconds && block.estimatedTimeSeconds > 0 ? block.estimatedTimeSeconds : 0;
+
+  const complete = (correctItems: number, totalItems: number) => {
+    if (!onComplete) return;
+    const maxPoints = getBlockMaxPoints(block, isGameMode);
+    let points = scorePartial(correctItems, totalItems, maxPoints);
+    if (isGameMode && maxPoints > 0 && timeLimit > 0) {
+      const multiplier = elapsedSeconds <= timeLimit * 0.5
+        ? 1
+        : elapsedSeconds <= timeLimit
+        ? 0.75
+        : elapsedSeconds <= timeLimit * 1.5
+        ? 0.5
+        : 0;
+      points = Math.round(points * multiplier);
+    }
+    const isCorrect = totalItems === 0 ? true : correctItems === totalItems;
+    onComplete(isCorrect, points, maxPoints);
+  };
+
+  const progress = timeLimit > 0
+    ? Math.min(100, (elapsedSeconds / timeLimit) * 100)
+    : 0;
+  const progressColor = progress <= 50 ? 'bg-emerald-500' : progress <= 100 ? 'bg-amber-500' : 'bg-rose-500';
+
   return (
     <div className="w-full bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-6 shadow-xl text-left">
+      {isGameMode && block.type !== 'content_card' && timeLimit > 0 && (
+        <div className="mb-4 space-y-1.5" aria-label="Tiempo límite">
+          <div className="flex justify-between text-[11px] text-zinc-400">
+            <span>Tiempo: {elapsedSeconds}s</span>
+            <span>Límite: {timeLimit}s</span>
+          </div>
+          <div className="h-2 overflow-hidden rounded-full bg-zinc-800">
+            <div className={`h-full transition-all ${progressColor}`} style={{ width: `${progress}%` }} />
+          </div>
+        </div>
+      )}
       {/* Optional attached image */}
-      {block.imageUrl && (
+      {block.imageUrl && block.type !== 'hotspot' && block.type !== 'error_detect' && (
         <div className="mb-4 rounded-xl overflow-hidden border border-zinc-800 max-h-72 w-full bg-black/40">
           <img 
             src={block.imageUrl} 
             alt="Material adjunto" 
-            className="w-full h-full object-contain mx-auto"
+            className="block w-full aspect-[16/9] max-h-[28rem] object-contain mx-auto"
             referrerPolicy="no-referrer"
           />
         </div>
       )}
 
       {block.type === 'content_card' && (
-        <ContentCardPlayer block={block} />
+        <ContentCardPlayer
+          block={block}
+          onComplete={() => complete(0, 0)}
+          onNext={onNext}
+          nextLabel={nextLabel}
+        />
       )}
       {block.type === 'flashcard' && (
-        <FlashcardPlayer block={block} onComplete={onComplete} isGameMode={isGameMode} />
+        <FlashcardPlayer
+          block={block}
+          onComplete={complete}
+          onNext={onNext}
+          nextLabel={nextLabel}
+          isGameMode={isGameMode}
+        />
       )}
       {block.type === 'connect' && (
-        <ConnectPlayer block={block} onComplete={onComplete} />
+        <ConnectPlayer block={block} onComplete={complete} onNext={onNext} nextLabel={nextLabel} />
       )}
       {block.type === 'sequence' && (
-        <SequencePlayer block={block} onComplete={onComplete} />
+        <SequencePlayer block={block} onComplete={complete} onNext={onNext} nextLabel={nextLabel} />
       )}
       {block.type === 'fill_blank' && (
-        <FillBlankPlayer block={block} onComplete={onComplete} />
+        <FillBlankPlayer block={block} onComplete={complete} onNext={onNext} nextLabel={nextLabel} />
       )}
       {block.type === 'swipe_classify' && (
-        <SwipeClassifyPlayer block={block} onComplete={onComplete} />
+        <SwipeClassifyPlayer block={block} onComplete={complete} onNext={onNext} nextLabel={nextLabel} />
       )}
       {block.type === 'error_detect' && (
-        <ErrorDetectPlayer block={block} onComplete={onComplete} />
+        <ErrorDetectPlayer block={block} onComplete={complete} onNext={onNext} nextLabel={nextLabel} />
       )}
       {block.type === 'hotspot' && (
-        <HotspotPlayer block={block} onComplete={onComplete} />
+        <HotspotPlayer block={block} onComplete={complete} onNext={onNext} nextLabel={nextLabel} />
       )}
       {block.type === 'true_false_rush' && (
-        <TrueFalseRushPlayer block={block} onComplete={onComplete} />
+        <TrueFalseRushPlayer block={block} onComplete={complete} onNext={onNext} nextLabel={nextLabel} />
       )}
       {block.type === 'slider_estimator' && (
-        <SliderEstimatorPlayer block={block} onComplete={onComplete} />
+        <SliderEstimatorPlayer block={block} onComplete={complete} onNext={onNext} nextLabel={nextLabel} />
       )}
     </div>
   );
 };
 
 // 0. Content Card Player
-const ContentCardPlayer: React.FC<{ block: ContentCardBlockData }> = ({ block }) => (
+const ContentCardPlayer: React.FC<{ block: ContentCardBlockData; onComplete: () => void } & PlayerNav> = ({
+  block,
+  onComplete,
+  onNext,
+  nextLabel
+}) => (
   <div className="space-y-3">
     {block.title && (
       <h3 className="text-lg font-bold font-display text-zinc-100 flex items-center gap-2">
-        <Sparkles className="w-4 h-4 text-indigo-400" />
-        {block.title}
+        <Sparkles className="w-4 h-4 text-indigo-400 shrink-0" />
+        <MathText text={block.title} />
       </h3>
     )}
-    <div className="p-4 bg-zinc-950/60 rounded-xl border border-zinc-800 text-sm text-zinc-300 leading-relaxed whitespace-pre-line">
-      {block.body}
+    <div className="p-4 bg-zinc-950/60 rounded-xl border border-zinc-800 text-sm text-zinc-300 leading-relaxed">
+      <MathText text={block.body} />
     </div>
+    <BlockActions
+      requiresCheck={false}
+      onNext={onNext ? () => { onComplete(); onNext(); } : undefined}
+      nextLabel={nextLabel}
+    />
   </div>
 );
 
 // 1. Flashcard 3D with Flip & Self-Evaluation (Easy / Medium / Hard)
 const FlashcardPlayer: React.FC<{ 
   block: FlashcardBlockData; 
-  onComplete?: (c: boolean, p: number) => void;
   isGameMode: boolean;
-}> = ({ block, onComplete }) => {
+} & PlayerNav> = ({ block, onComplete, onNext, nextLabel }) => {
   const [isFlipped, setIsFlipped] = useState(false);
-  const [mastery, setMastery] = useState<'easy' | 'medium' | 'hard' | null>(null);
 
-  const handleSelfEval = (level: 'easy' | 'medium' | 'hard') => {
-    setMastery(level);
-    if (onComplete) {
-      const pts = level === 'easy' ? 100 : level === 'medium' ? 70 : 40;
-      onComplete(true, pts);
-    }
+  const handleFlip = () => {
+    setIsFlipped(value => !value);
   };
 
   return (
@@ -122,7 +249,7 @@ const FlashcardPlayer: React.FC<{
         <span>Ficha de Repaso 3D (Estilo NotebookLM)</span>
         <button
           type="button"
-          onClick={() => setIsFlipped(!isFlipped)}
+          onClick={handleFlip}
           className="flex items-center gap-1 text-indigo-400 hover:text-indigo-300 font-semibold"
         >
           <RotateCw className="w-3.5 h-3.5" />
@@ -132,7 +259,7 @@ const FlashcardPlayer: React.FC<{
 
       {/* 3D Card Container */}
       <div 
-        onClick={() => setIsFlipped(!isFlipped)}
+        onClick={handleFlip}
         className="perspective-1000 w-full min-h-[200px] cursor-pointer"
       >
         <div 
@@ -149,7 +276,7 @@ const FlashcardPlayer: React.FC<{
               <span className="text-xs text-zinc-400">Haz clic para voltear</span>
             </div>
             <p className="text-base sm:text-lg font-medium text-zinc-100 my-auto text-center py-4">
-              {block.question}
+              <MathText text={block.question} />
             </p>
             <div className="text-center text-xs text-zinc-500 flex items-center justify-center gap-1">
               <RotateCw className="w-3 h-3" />
@@ -166,56 +293,20 @@ const FlashcardPlayer: React.FC<{
               <span className="text-xs text-zinc-400">Explicación guiada</span>
             </div>
             <p className="text-sm sm:text-base text-zinc-200 my-auto text-center py-4 leading-relaxed">
-              {block.answer}
+              <MathText text={block.answer} />
             </p>
             <div className="text-center text-xs text-indigo-400">
-              Auto-evalúa tu dominio abajo 👇
+              Voltea la ficha para confirmar que la revisaste.
             </div>
           </div>
         </div>
       </div>
 
-      {/* Self-evaluation Mastery buttons */}
-      <div className="pt-2">
-        <span className="block text-xs font-semibold text-zinc-400 mb-2 text-center">
-          ¿Cómo dominas este concepto?
-        </span>
-        <div className="grid grid-cols-3 gap-2 max-w-sm mx-auto">
-          <button
-            type="button"
-            onClick={() => handleSelfEval('hard')}
-            className={`py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
-              mastery === 'hard'
-                ? 'bg-rose-600 text-white border-rose-500 shadow-md'
-                : 'bg-zinc-800/80 border-zinc-700 text-rose-400 hover:bg-rose-500/10'
-            }`}
-          >
-            Difícil ⚠️
-          </button>
-          <button
-            type="button"
-            onClick={() => handleSelfEval('medium')}
-            className={`py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
-              mastery === 'medium'
-                ? 'bg-amber-600 text-white border-amber-500 shadow-md'
-                : 'bg-zinc-800/80 border-zinc-700 text-amber-400 hover:bg-amber-500/10'
-            }`}
-          >
-            Medio ⚖️
-          </button>
-          <button
-            type="button"
-            onClick={() => handleSelfEval('easy')}
-            className={`py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
-              mastery === 'easy'
-                ? 'bg-emerald-600 text-white border-emerald-500 shadow-md'
-                : 'bg-zinc-800/80 border-zinc-700 text-emerald-400 hover:bg-emerald-500/10'
-            }`}
-          >
-            Dominado ✓
-          </button>
-        </div>
-      </div>
+      <BlockActions
+        requiresCheck={false}
+        onNext={onNext ? () => { onComplete?.(1, 1); onNext(); } : undefined}
+        nextLabel={nextLabel}
+      />
     </div>
   );
 };
@@ -223,11 +314,11 @@ const FlashcardPlayer: React.FC<{
 // 2. Conectar / Relacionar (Two clear columns A & B matching)
 const ConnectPlayer: React.FC<{
   block: ConnectBlockData;
-  onComplete?: (c: boolean, p: number) => void;
-}> = ({ block, onComplete }) => {
+} & PlayerNav> = ({ block, onComplete, onNext, nextLabel }) => {
   const [selectedLeft, setSelectedLeft] = useState<string | null>(null);
   const [connections, setConnections] = useState<Record<string, string>>({}); // leftId -> rightId
   const [validated, setValidated] = useState(false);
+  const [isAllCorrect, setIsAllCorrect] = useState(false);
 
   // Scramble rights once
   const [shuffledRights] = useState(() => {
@@ -239,11 +330,30 @@ const ConnectPlayer: React.FC<{
     setSelectedLeft(id);
   };
 
+  const dropConnection = (leftId: string) => {
+    if (validated) return;
+    setConnections(current => {
+      const next = { ...current };
+      delete next[leftId];
+      return next;
+    });
+    if (selectedLeft === leftId) setSelectedLeft(null);
+  };
+
   const handleRightClick = (rightPairId: string) => {
-    if (validated || !selectedLeft) return;
-    setConnections({
-      ...connections,
-      [selectedLeft]: rightPairId
+    if (validated) return;
+    if (!selectedLeft) {
+      const owner = Object.entries(connections).find(([, rightId]) => rightId === rightPairId)?.[0];
+      if (owner) dropConnection(owner);
+      return;
+    }
+    setConnections(current => {
+      const next = { ...current };
+      Object.entries(next).forEach(([leftId, rightId]) => {
+        if (rightId === rightPairId) delete next[leftId];
+      });
+      next[selectedLeft] = rightPairId;
+      return next;
     });
     setSelectedLeft(null);
   };
@@ -256,24 +366,24 @@ const ConnectPlayer: React.FC<{
         correct += 1;
       }
     });
-    const isAllCorrect = correct === block.pairs.length;
-    if (onComplete) {
-      onComplete(isAllCorrect, Math.round((correct / block.pairs.length) * 100));
-    }
+    const allCorrect = correct === block.pairs.length;
+    setIsAllCorrect(allCorrect);
+    onComplete?.(correct, block.pairs.length);
   };
 
   const handleReset = () => {
     setConnections({});
     setSelectedLeft(null);
     setValidated(false);
+    setIsAllCorrect(false);
   };
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h4 className="text-sm font-bold text-zinc-100">{block.prompt}</h4>
+        <h4 className="text-sm font-bold text-zinc-100"><MathText text={block.prompt} /></h4>
         <span className="text-xs text-zinc-400">
-          {Object.keys(connections).length} / {block.pairs.length} parejas formadas
+          Elige a la izquierda y luego su pareja. Quitar suelta solo esa.
         </span>
       </div>
 
@@ -304,7 +414,30 @@ const ConnectPlayer: React.FC<{
                     : 'bg-zinc-800/60 border-zinc-700/80 text-zinc-300 hover:bg-zinc-800 hover:border-zinc-600'
                 }`}
               >
-                {pair.left}
+                <MathText text={pair.left} />
+                {hasConnection && (
+                  <span className="mt-1.5 flex items-center justify-between gap-2 text-[11px] font-medium text-indigo-200">
+                    <span className="min-w-0">Con <MathText text={block.pairs.find(item => item.id === connections[pair.id])?.right || ''} /></span>
+                    {!validated && (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={event => {
+                          event.stopPropagation();
+                          dropConnection(pair.id);
+                        }}
+                        onKeyDown={event => {
+                          if (event.key !== 'Enter') return;
+                          event.stopPropagation();
+                          dropConnection(pair.id);
+                        }}
+                        className="shrink-0 text-zinc-400 hover:text-rose-300"
+                      >
+                        Quitar
+                      </span>
+                    )}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -333,7 +466,12 @@ const ConnectPlayer: React.FC<{
                     : 'bg-zinc-800/60 border-zinc-700/80 text-zinc-300 hover:bg-zinc-800 hover:border-zinc-600'
                 }`}
               >
-                {pair.right}
+                <MathText text={pair.right} />
+                {isPairedWith && (
+                  <span className="mt-1.5 block text-[11px] font-medium text-indigo-200">
+                    Con <MathText text={block.pairs.find(item => item.id === isPairedWith[0])?.left || ''} />
+                  </span>
+                )}
               </button>
             );
           })}
@@ -349,23 +487,17 @@ const ConnectPlayer: React.FC<{
           Limpiar conexiones
         </button>
 
-        {!validated ? (
-          <button
-            type="button"
-            onClick={handleCheck}
-            disabled={Object.keys(connections).length === 0}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold text-xs rounded-xl shadow-md transition-all flex items-center gap-1.5"
-          >
-            <Check className="w-4 h-4" />
-            Comprobar Respuestas
-          </button>
-        ) : (
-          <span className="text-xs font-bold text-emerald-400 flex items-center gap-1">
-            <CheckCircle2 className="w-4 h-4" />
-            ¡Evaluado!
-          </span>
-        )}
       </div>
+      <BlockActions
+        requiresCheck
+        canCheck={Object.keys(connections).length > 0}
+        checked={validated}
+        isCorrect={validated ? isAllCorrect : null}
+        onCheck={handleCheck}
+        onNext={onNext}
+        nextLabel={nextLabel}
+        checkLabel="Comprobar"
+      />
     </div>
   );
 };
@@ -373,13 +505,34 @@ const ConnectPlayer: React.FC<{
 // 3. Organización / Secuencia
 const SequencePlayer: React.FC<{
   block: SequenceBlockData;
-  onComplete?: (c: boolean, p: number) => void;
-}> = ({ block, onComplete }) => {
+} & PlayerNav> = ({ block, onComplete, onNext, nextLabel }) => {
   const [items, setItems] = useState(() => {
     // start shuffled
     return [...block.items].sort(() => Math.random() - 0.5);
   });
   const [validated, setValidated] = useState(false);
+  const [isAllCorrect, setIsAllCorrect] = useState(false);
+  const dragging = useRef<string | null>(null);
+  const overIndex = useRef<number | null>(null);
+  const [lift, setLift] = useState<{ id: string; x: number; y: number; width: number; offsetY: number } | null>(null);
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  const dropOn = (target: number) => {
+    const fromId = dragging.current;
+    dragging.current = null;
+    overIndex.current = null;
+    setLift(null);
+    setHoverIndex(null);
+    if (!fromId || validated || Number.isNaN(target)) return;
+    setItems(current => {
+      const from = current.findIndex(entry => entry.id === fromId);
+      if (from < 0 || from === target) return current;
+      const next = [...current];
+      const [moved] = next.splice(from, 1);
+      next.splice(target, 0, moved);
+      return next;
+    });
+  };
 
   const moveItem = (index: number, direction: 'up' | 'down') => {
     if (validated) return;
@@ -400,17 +553,16 @@ const SequencePlayer: React.FC<{
         correct++;
       }
     });
-    const isAllCorrect = correct === items.length;
-    if (onComplete) {
-      onComplete(isAllCorrect, Math.round((correct / items.length) * 100));
-    }
+    const allCorrect = correct === items.length;
+    setIsAllCorrect(allCorrect);
+    onComplete?.(correct, items.length);
   };
 
   return (
     <div className="space-y-4">
       <div>
-        <h4 className="text-sm font-bold text-zinc-100">{block.prompt}</h4>
-        <span className="text-xs text-zinc-400">Ordena los pasos de arriba hacia abajo usando las flechas:</span>
+        <h4 className="text-sm font-bold text-zinc-100"><MathText text={block.prompt} /></h4>
+        <span className="text-xs text-zinc-400">Arrastra cada paso para ordenarlo. También sirven las flechas.</span>
       </div>
 
       <div className="space-y-2">
@@ -421,7 +573,40 @@ const SequencePlayer: React.FC<{
           return (
             <div
               key={item.id}
-              className={`flex items-center gap-3 p-3 rounded-xl border transition-all ${
+              data-seq={idx}
+              onPointerDown={event => {
+                if (validated || (event.target as HTMLElement).closest('button')) return;
+                const box = event.currentTarget.getBoundingClientRect();
+                dragging.current = item.id;
+                overIndex.current = idx;
+                setHoverIndex(idx);
+                setLift({
+                  id: item.id,
+                  x: box.left,
+                  y: box.top,
+                  width: box.width,
+                  offsetY: event.clientY - box.top,
+                });
+                event.currentTarget.setPointerCapture(event.pointerId);
+              }}
+              onPointerMove={event => {
+                if (dragging.current !== item.id) return;
+                setLift(current => current ? { ...current, y: event.clientY - current.offsetY } : current);
+                const row = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-seq]');
+                const target = Number(row?.getAttribute('data-seq'));
+                if (Number.isNaN(target)) return;
+                overIndex.current = target;
+                setHoverIndex(target);
+              }}
+              onPointerUp={() => dropOn(overIndex.current ?? Number.NaN)}
+              onPointerCancel={() => dropOn(Number.NaN)}
+              className={`flex items-center gap-3 p-3 rounded-xl border touch-none ${
+                lift?.id === item.id
+                  ? 'cursor-grabbing opacity-30 border-dashed border-zinc-600'
+                  : hoverIndex === idx
+                  ? 'cursor-grab border-indigo-400'
+                  : 'cursor-grab'
+              } ${
                 isCorrect
                   ? 'bg-emerald-950/40 border-emerald-500 text-emerald-200'
                   : isWrong
@@ -429,11 +614,12 @@ const SequencePlayer: React.FC<{
                   : 'bg-zinc-800/80 border-zinc-700/80 text-zinc-200'
               }`}
             >
+              {!validated && <GripVertical className="w-4 h-4 shrink-0 text-zinc-500" />}
               <span className="w-6 h-6 rounded-full bg-zinc-900 border border-zinc-700 text-xs font-bold text-zinc-400 flex items-center justify-center">
                 {idx + 1}
               </span>
 
-              <span className="flex-1 text-xs sm:text-sm font-medium">{item.text}</span>
+              <span className="flex-1 text-xs sm:text-sm font-medium"><MathText text={item.text} /></span>
 
               {!validated && (
                 <div className="flex items-center gap-1">
@@ -459,21 +645,27 @@ const SequencePlayer: React.FC<{
           );
         })}
       </div>
+      {lift && (
+        <div
+          className="fixed z-50 pointer-events-none flex items-center gap-3 p-3 rounded-xl border border-indigo-400 bg-zinc-800 text-zinc-100 shadow-2xl shadow-black/70 scale-105"
+          style={{ left: lift.x, top: lift.y, width: lift.width }}
+        >
+          <GripVertical className="w-4 h-4 shrink-0 text-zinc-300" />
+          <span className="flex-1 text-xs sm:text-sm font-medium">
+            <MathText text={items.find(entry => entry.id === lift.id)?.text || ''} />
+          </span>
+        </div>
+      )}
 
-      <div className="flex justify-end pt-2">
-        {!validated ? (
-          <button
-            type="button"
-            onClick={handleCheck}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-md transition-all flex items-center gap-1.5"
-          >
-            <Check className="w-4 h-4" />
-            Validar Orden
-          </button>
-        ) : (
-          <span className="text-xs font-bold text-indigo-400">Secuencia revisada</span>
-        )}
-      </div>
+      <BlockActions
+        requiresCheck
+        checked={validated}
+        isCorrect={validated ? isAllCorrect : null}
+        onCheck={handleCheck}
+        onNext={onNext}
+        nextLabel={nextLabel}
+        checkLabel="Comprobar"
+      />
     </div>
   );
 };
@@ -481,8 +673,7 @@ const SequencePlayer: React.FC<{
 // 4. Rellenar Espacios ("Fill Blank") with ABCD or Free Typing Case-Insensitive
 const FillBlankPlayer: React.FC<{
   block: FillBlankBlockData;
-  onComplete?: (c: boolean, p: number) => void;
-}> = ({ block, onComplete }) => {
+} & PlayerNav> = ({ block, onComplete, onNext, nextLabel }) => {
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const [typedAnswer, setTypedAnswer] = useState('');
   const [validated, setValidated] = useState(false);
@@ -493,7 +684,8 @@ const FillBlankPlayer: React.FC<{
     let correct = false;
 
     if (block.mode === 'multiple_choice') {
-      correct = selectedOption?.trim().toLowerCase() === block.correctAnswer.trim().toLowerCase();
+      const selectedIndex = selectedOption ? block.options.indexOf(selectedOption) : -1;
+      correct = selectedIndex === (block.correctOptionIndex ?? block.options.indexOf(block.correctAnswer));
     } else {
       // Case-insensitive free text comparison
       correct = typedAnswer.trim().toLowerCase() === block.correctAnswer.trim().toLowerCase();
@@ -501,7 +693,7 @@ const FillBlankPlayer: React.FC<{
 
     setIsCorrect(correct);
     if (onComplete) {
-      onComplete(correct, correct ? 100 : 0);
+      onComplete(correct ? 1 : 0, 1);
     }
   };
 
@@ -510,7 +702,7 @@ const FillBlankPlayer: React.FC<{
       <div>
         <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">Rellenar Espacio</span>
         <p className="text-base sm:text-lg font-medium text-zinc-100 mt-1 leading-relaxed">
-          {block.sentence}
+          <MathText text={block.sentence} />
         </p>
       </div>
 
@@ -518,7 +710,7 @@ const FillBlankPlayer: React.FC<{
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {block.options.map((opt, i) => {
             const isSelected = selectedOption === opt;
-            const isRight = validated && opt.toLowerCase() === block.correctAnswer.toLowerCase();
+            const isRight = validated && opt.trim().toLowerCase() === block.correctAnswer.trim().toLowerCase();
             const isWrong = validated && isSelected && !isRight;
 
             return (
@@ -540,7 +732,7 @@ const FillBlankPlayer: React.FC<{
                 <span className="w-5 h-5 rounded-full bg-zinc-900 border border-zinc-700 text-indigo-400 flex items-center justify-center font-bold text-[11px]">
                   {String.fromCharCode(65 + i)}
                 </span>
-                <span>{opt}</span>
+                <span><MathText text={opt} /></span>
               </button>
             );
           })}
@@ -553,7 +745,13 @@ const FillBlankPlayer: React.FC<{
             onChange={e => setTypedAnswer(e.target.value)}
             disabled={validated}
             placeholder="Escribe la respuesta aquí (no importa mayúsculas/minúsculas)..."
-            className="w-full px-4 py-2.5 bg-zinc-800 border border-zinc-700 rounded-xl text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
+            className={`w-full px-4 py-2.5 bg-zinc-800 border rounded-xl text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none ${
+              validated
+                ? isCorrect
+                  ? 'border-emerald-500 bg-emerald-950/40 text-emerald-200'
+                  : 'border-rose-500 bg-rose-950/40 text-rose-200'
+                : 'border-zinc-700 focus:border-indigo-500'
+            }`}
           />
           <span className="text-[11px] text-zinc-500">
             Validación tolerante a mayúsculas/minúsculas.
@@ -567,24 +765,25 @@ const FillBlankPlayer: React.FC<{
         }`}>
           <div className="font-bold flex items-center gap-1.5 mb-0.5">
             {isCorrect ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <AlertCircle className="w-4 h-4 text-rose-400" />}
-            {isCorrect ? '¡Excelente! Respuesta Correcta.' : `Incorrecto. La respuesta correcta es: "${block.correctAnswer}"`}
+            {isCorrect ? '¡Excelente! Respuesta correcta.' : 'Respuesta incorrecta.'}
           </div>
-          {block.explanation && <p className="text-zinc-400 mt-1">{block.explanation}</p>}
+          {block.mode !== 'multiple_choice' && block.explanation && <p className="text-zinc-400 mt-1"><MathText text={block.explanation} /></p>}
         </div>
       )}
 
       {!validated && (
-        <div className="flex justify-end pt-1">
-          <button
-            type="button"
-            onClick={handleCheck}
-            disabled={block.mode === 'multiple_choice' ? !selectedOption : !typedAnswer.trim()}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold text-xs rounded-xl shadow-md transition-all"
-          >
-            Comprobar Respuesta
-          </button>
-        </div>
+        <p className="text-xs text-zinc-500">Elige o escribe tu respuesta y pulsa Comprobar para ver si es correcta.</p>
       )}
+      <BlockActions
+        requiresCheck
+        canCheck={block.mode === 'multiple_choice' ? Boolean(selectedOption) : Boolean(typedAnswer.trim())}
+        checked={validated}
+        isCorrect={validated ? isCorrect : null}
+        onCheck={handleCheck}
+        onNext={onNext}
+        nextLabel={nextLabel}
+        checkLabel="Comprobar"
+      />
     </div>
   );
 };
@@ -592,10 +791,10 @@ const FillBlankPlayer: React.FC<{
 // 5. Clasificación Rápida ("Swipe") - 2 categories (drag/swipe lists) or >2 bottom box categories
 const SwipeClassifyPlayer: React.FC<{
   block: SwipeClassifyBlockData;
-  onComplete?: (c: boolean, p: number) => void;
-}> = ({ block, onComplete }) => {
+} & PlayerNav> = ({ block, onComplete, onNext, nextLabel }) => {
   const [assignments, setAssignments] = useState<Record<string, string>>({});
   const [validated, setValidated] = useState(false);
+  const [allCorrect, setAllCorrect] = useState(false);
 
   const isTwoCategories = block.categories.length === 2;
 
@@ -611,15 +810,14 @@ const SwipeClassifyPlayer: React.FC<{
       if (assignments[it.id] === it.category) correct++;
     });
     const all = correct === block.items.length;
-    if (onComplete) {
-      onComplete(all, Math.round((correct / block.items.length) * 100));
-    }
+    setAllCorrect(all);
+    onComplete?.(correct, block.items.length);
   };
 
   return (
     <div className="space-y-4">
       <div>
-        <h4 className="text-sm font-bold text-zinc-100">{block.prompt}</h4>
+        <h4 className="text-sm font-bold text-zinc-100"><MathText text={block.prompt} /></h4>
         <span className="text-xs text-zinc-400">
           {isTwoCategories 
             ? 'Selecciona la categoría (izquierda o derecha) para cada elemento:' 
@@ -645,7 +843,7 @@ const SwipeClassifyPlayer: React.FC<{
                   : 'bg-zinc-800/80 border-zinc-700/80 text-zinc-200'
               }`}
             >
-              <span className="text-xs sm:text-sm font-medium">{item.text}</span>
+              <span className="text-xs sm:text-sm font-medium"><MathText text={item.text} /></span>
 
               {/* Category picker buttons */}
               <div className="flex flex-wrap items-center gap-1.5">
@@ -661,7 +859,7 @@ const SwipeClassifyPlayer: React.FC<{
                         : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-zinc-200'
                     }`}
                   >
-                    {cat}
+                    <MathText text={cat} />
                   </button>
                 ))}
               </div>
@@ -670,20 +868,16 @@ const SwipeClassifyPlayer: React.FC<{
         })}
       </div>
 
-      <div className="flex justify-end pt-2">
-        {!validated ? (
-          <button
-            type="button"
-            onClick={handleCheck}
-            disabled={Object.keys(assignments).length === 0}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-semibold text-xs rounded-xl shadow-md transition-all"
-          >
-            Comprobar Clasificación
-          </button>
-        ) : (
-          <span className="text-xs font-bold text-indigo-400">Clasificación revisada</span>
-        )}
-      </div>
+      <BlockActions
+        requiresCheck
+        canCheck={Object.keys(assignments).length > 0}
+        checked={validated}
+        isCorrect={validated ? allCorrect : null}
+        onCheck={handleCheck}
+        onNext={onNext}
+        nextLabel={nextLabel}
+        checkLabel="Comprobar"
+      />
     </div>
   );
 };
@@ -691,30 +885,30 @@ const SwipeClassifyPlayer: React.FC<{
 // 6. Detección de Error / Protección de errores (Estilo CAPTCHA interactivo)
 const ErrorDetectPlayer: React.FC<{
   block: ErrorDetectBlockData;
-  onComplete?: (c: boolean, p: number) => void;
-}> = ({ block, onComplete }) => {
+} & PlayerNav> = ({ block, onComplete, onNext, nextLabel }) => {
   const [clickPos, setClickPos] = useState<{ x: number; y: number } | null>(null);
   const [isSuccess, setIsSuccess] = useState<boolean | null>(null);
+  const [validated, setValidated] = useState(false);
   const imgRef = React.useRef<HTMLDivElement>(null);
 
   const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (isSuccess !== null || !imgRef.current) return;
+    if (validated || !imgRef.current) return;
     const rect = imgRef.current.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * 100;
     const y = ((e.clientY - rect.top) / rect.height) * 100;
-
     setClickPos({ x, y });
+    setIsSuccess(null);
+  };
 
-    // Distance formula
-    const dx = x - block.targetZone.xPercent;
-    const dy = y - block.targetZone.yPercent;
+  const handleCheck = () => {
+    if (!clickPos) return;
+    const dx = clickPos.x - block.targetZone.xPercent;
+    const dy = clickPos.y - block.targetZone.yPercent;
     const dist = Math.sqrt(dx * dx + dy * dy);
-
     const hit = dist <= (block.targetZone.radiusPercent || 15);
     setIsSuccess(hit);
-    if (onComplete) {
-      onComplete(hit, hit ? 100 : 0);
-    }
+    setValidated(true);
+    onComplete?.(hit ? 1 : 0, 1);
   };
 
   return (
@@ -723,36 +917,38 @@ const ErrorDetectPlayer: React.FC<{
         <span className="text-xs font-bold uppercase tracking-wider text-rose-400">
           Detección de Error (CAPTCHA Interactivo)
         </span>
-        <h4 className="text-sm font-bold text-zinc-100 mt-0.5">{block.instruction}</h4>
+        <h4 className="text-sm font-bold text-zinc-100 mt-0.5"><MathText text={block.instruction} /></h4>
       </div>
 
       <div 
         ref={imgRef}
         onClick={handleClick}
-        className="relative h-64 sm:h-80 w-full rounded-2xl overflow-hidden border border-zinc-700 cursor-crosshair bg-black"
+        className="relative aspect-[16/9] w-full rounded-2xl overflow-hidden border border-zinc-700 cursor-crosshair bg-black"
       >
         {block.imageUrl ? (
-          <img src={block.imageUrl} alt="Error detector" className="w-full h-full object-cover select-none" referrerPolicy="no-referrer" />
+          <img src={block.imageUrl} alt="Error detector" className="w-full h-full object-contain select-none" referrerPolicy="no-referrer" />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-xs text-zinc-500">
             Imagen no configurada
           </div>
         )}
 
-        {/* User touch indicator */}
         {clickPos && (
           <div
             style={{ left: `${clickPos.x}%`, top: `${clickPos.y}%`, transform: 'translate(-50%, -50%)' }}
-            className={`absolute w-6 h-6 rounded-full border-2 flex items-center justify-center ${
-              isSuccess ? 'border-emerald-400 bg-emerald-500/40 text-white' : 'border-rose-500 bg-rose-500/40 text-white'
+            className={`absolute w-8 h-8 rounded-full border-[3px] flex items-center justify-center shadow-lg pointer-events-none ${
+              !validated
+                ? 'border-white bg-indigo-500 text-white'
+                : isSuccess
+                ? 'border-emerald-200 bg-emerald-500 text-white'
+                : 'border-rose-200 bg-rose-500 text-white'
             }`}
           >
-            {isSuccess ? <Check className="w-3.5 h-3.5" /> : <X className="w-3.5 h-3.5" />}
+            {validated ? (isSuccess ? <Check className="w-4 h-4" /> : <X className="w-4 h-4" />) : <span className="w-2 h-2 rounded-full bg-white" />}
           </div>
         )}
 
-        {/* Reveal target zone on failure */}
-        {isSuccess === false && (
+        {validated && isSuccess === false && (
           <div
             style={{
               left: `${block.targetZone.xPercent}%`,
@@ -766,16 +962,24 @@ const ErrorDetectPlayer: React.FC<{
         )}
       </div>
 
-      {isSuccess !== null && (
+      {validated && isSuccess !== null && (
         <div className={`p-3 rounded-xl border text-xs ${
           isSuccess ? 'bg-emerald-950/40 border-emerald-500 text-emerald-200' : 'bg-rose-950/40 border-rose-500 text-rose-200'
         }`}>
-          <div className="font-bold">
-            {isSuccess ? '¡Excelente detección del error!' : 'No diste en el punto exacto.'}
-          </div>
-          <p className="text-zinc-300 mt-0.5">{block.explanation}</p>
+          <div className="font-bold">{isSuccess ? 'Zona seleccionada correctamente.' : 'La zona seleccionada es incorrecta.'}</div>
+          <p className="text-zinc-300 mt-0.5"><MathText text={block.explanation} /></p>
         </div>
       )}
+      <BlockActions
+        requiresCheck
+        canCheck={Boolean(clickPos)}
+        checked={validated}
+        isCorrect={validated ? isSuccess : null}
+        onCheck={handleCheck}
+        onNext={onNext}
+        nextLabel={nextLabel}
+        checkLabel="Comprobar"
+      />
     </div>
   );
 };
@@ -783,86 +987,148 @@ const ErrorDetectPlayer: React.FC<{
 // 7. Diagrama / Hotspot (Sequential or Free)
 const HotspotPlayer: React.FC<{
   block: HotspotBlockData;
-  onComplete?: (c: boolean, p: number) => void;
-}> = ({ block, onComplete }) => {
+} & PlayerNav> = ({ block, onComplete, onNext, nextLabel }) => {
   const [visitedPoints, setVisitedPoints] = useState<string[]>([]);
   const [failed, setFailed] = useState(false);
+  const [validated, setValidated] = useState(false);
+  const [isCorrect, setIsCorrect] = useState(false);
+  const [markers, setMarkers] = useState<{ x: number; y: number; hit: boolean }[]>([]);
+  const totalPoints = block.hotspots.length;
 
-  const handlePointClick = (ptId: string, ptOrder?: number) => {
-    if (visitedPoints.includes(ptId) || failed) return;
+  const handleSurfaceClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (validated) return;
+    if (!block.isSequential && markers.length >= totalPoints) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * 100;
+    const y = ((event.clientY - rect.top) / rect.height) * 100;
+
+    const nearest = block.hotspots
+      .map(point => ({ point, distance: Math.hypot(x - point.xPercent, y - point.yPercent) }))
+      .sort((a, b) => a.distance - b.distance)[0];
+    const radius = nearest?.point.radiusPercent ?? 8;
+    const isOnHotspot = Boolean(nearest && nearest.distance <= radius);
+    const alreadyVisited = isOnHotspot && visitedPoints.includes(nearest.point.id);
 
     if (block.isSequential) {
-      const expectedStep = visitedPoints.length + 1;
-      if (ptOrder !== expectedStep) {
-        setFailed(true);
-        if (onComplete) onComplete(false, 0);
+      if (isOnHotspot && !alreadyVisited && !failed) {
+        const expectedStep = visitedPoints.length + 1;
+        if (nearest.point.stepOrder !== expectedStep) {
+          setFailed(true);
+          setMarkers(prev => [...prev, { x, y, hit: false }]);
+          return;
+        }
+        setVisitedPoints(prev => [...prev, nearest.point.id]);
+        setMarkers(prev => [...prev, { x, y, hit: true }]);
         return;
       }
+      setFailed(true);
+      setMarkers(prev => [...prev, { x, y, hit: false }]);
+      return;
     }
 
-    const next = [...visitedPoints, ptId];
-    setVisitedPoints(next);
-
-    if (next.length === block.hotspots.length) {
-      if (onComplete) onComplete(true, 100);
+    if (isOnHotspot && !alreadyVisited) {
+      setVisitedPoints(prev => [...prev, nearest.point.id]);
     }
+    setMarkers(prev => [...prev, { x, y, hit: false }]);
+  };
+
+  const handleClear = () => {
+    if (validated) return;
+    setVisitedPoints([]);
+    setFailed(false);
+    setIsCorrect(false);
+    setMarkers([]);
+  };
+
+  const handleCheck = () => {
+    const correctCount = visitedPoints.length;
+    const allFound = !failed && correctCount === totalPoints && totalPoints > 0;
+    setIsCorrect(allFound);
+    setValidated(true);
+    onComplete?.(correctCount, Math.max(1, totalPoints));
   };
 
   return (
     <div className="space-y-4">
       <div>
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3">
           <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">
             Diagrama Interactivo {block.isSequential ? '(Secuencia Estricta)' : '(Exploración Libre)'}
           </span>
-          <span className="text-xs text-zinc-400 font-mono">
-            {visitedPoints.length} / {block.hotspots.length} identificados
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-700 text-xs font-mono font-bold text-indigo-300">
+              {block.isSequential
+                ? `${visitedPoints.length} / ${totalPoints} identificados`
+                : `${markers.length} / ${totalPoints} puntos`}
+            </span>
+            <button
+              type="button"
+              onClick={handleClear}
+              disabled={validated || markers.length === 0}
+              className="px-2.5 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-[11px] font-bold text-zinc-200 hover:bg-zinc-700 disabled:opacity-40 flex items-center gap-1"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Limpiar
+            </button>
+          </div>
         </div>
-        <h4 className="text-sm font-bold text-zinc-100 mt-0.5">{block.instruction}</h4>
+        <h4 className="text-sm font-bold text-zinc-100 mt-0.5"><MathText text={block.instruction} /></h4>
+        {!block.isSequential && (
+          <p className="text-[11px] text-zinc-500 mt-1">
+            Marca exactamente {totalPoints} {totalPoints === 1 ? 'punto' : 'puntos'}. Al comprobar sabrás si están bien.
+          </p>
+        )}
       </div>
 
-      <div className="relative h-64 sm:h-80 w-full rounded-2xl overflow-hidden border border-zinc-700 bg-black">
+      <div
+        onClick={handleSurfaceClick}
+        className="relative aspect-[16/9] w-full rounded-2xl overflow-hidden border border-zinc-700 bg-black cursor-crosshair"
+      >
         {block.imageUrl ? (
-          <img src={block.imageUrl} alt="Diagram" className="w-full h-full object-cover select-none" referrerPolicy="no-referrer" />
+          <img src={block.imageUrl} alt="Diagram" className="w-full h-full object-contain select-none pointer-events-none" referrerPolicy="no-referrer" />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-xs text-zinc-500">
             Diagrama sin imagen
           </div>
         )}
 
-        {block.hotspots.map((pt, idx) => {
-          const isVisited = visitedPoints.includes(pt.id);
-          return (
-            <button
-              key={pt.id}
-              type="button"
-              onClick={() => handlePointClick(pt.id, pt.stepOrder || idx + 1)}
-              style={{ left: `${pt.xPercent}%`, top: `${pt.yPercent}%`, transform: 'translate(-50%, -50%)' }}
-              className={`absolute w-8 h-8 rounded-full border-2 flex items-center justify-center text-xs font-bold shadow-xl transition-transform hover:scale-110 ${
-                isVisited
-                  ? 'bg-emerald-600 border-white text-white'
-                  : 'bg-indigo-600/90 border-white text-white'
-              }`}
-            >
-              {isVisited ? <Check className="w-4 h-4" /> : idx + 1}
-            </button>
-          );
-        })}
+        {markers.map((marker, index) => (
+          <div
+            key={`${marker.x}-${marker.y}-${index}`}
+            className="absolute w-7 h-7 rounded-full border-2 border-white bg-indigo-500/90 text-white flex items-center justify-center shadow-lg pointer-events-none"
+            style={{ left: `${marker.x}%`, top: `${marker.y}%`, transform: 'translate(-50%, -50%)' }}
+          >
+            <span className="text-[10px] font-black">{index + 1}</span>
+          </div>
+        ))}
       </div>
 
-      {failed && (
+      {failed && !validated && (
         <div className="p-3 bg-rose-950/40 border border-rose-500 text-rose-200 rounded-xl text-xs">
-          ⚠️ Has presionado un punto fuera de secuencia. Vuelve a intentarlo desde el paso 1.
+          Has presionado un punto fuera de secuencia. Comprueba para ver el resultado.
         </div>
       )}
 
-      {visitedPoints.length === block.hotspots.length && (
-        <div className="p-3 bg-emerald-950/40 border border-emerald-500 text-emerald-200 rounded-xl text-xs font-semibold flex items-center gap-1.5">
-          <CheckCircle2 className="w-4 h-4" />
-          ¡Completaste todos los puntos del diagrama correctamente!
+      {validated && (
+        <div className={`p-3 rounded-xl border text-xs font-semibold flex items-center gap-1.5 ${
+          isCorrect ? 'bg-emerald-950/40 border-emerald-500 text-emerald-200' : 'bg-rose-950/40 border-rose-500 text-rose-200'
+        }`}>
+          {isCorrect ? <CheckCircle2 className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+          {isCorrect
+            ? 'Completaste todos los puntos del diagrama correctamente.'
+            : `Identificaste ${visitedPoints.length} de ${totalPoints} puntos.`}
         </div>
       )}
+      <BlockActions
+        requiresCheck
+        canCheck={!block.isSequential ? markers.length === totalPoints && totalPoints > 0 : markers.length > 0 || visitedPoints.length > 0 || failed}
+        checked={validated}
+        isCorrect={validated ? isCorrect : null}
+        onCheck={handleCheck}
+        onNext={onNext}
+        nextLabel={nextLabel}
+        checkLabel="Comprobar"
+      />
     </div>
   );
 };
@@ -870,37 +1136,41 @@ const HotspotPlayer: React.FC<{
 // 8. Ráfaga Verdadero / Falso (V/F) Carousel with Green/Red Swipe Animation
 const TrueFalseRushPlayer: React.FC<{
   block: TrueFalseRushBlockData;
-  onComplete?: (c: boolean, p: number) => void;
-}> = ({ block, onComplete }) => {
+} & PlayerNav> = ({ block, onComplete, onNext, nextLabel }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [selected, setSelected] = useState<boolean | null>(null);
+  const [checkedCurrent, setCheckedCurrent] = useState(false);
   const [feedback, setFeedback] = useState<'correct' | 'wrong' | null>(null);
   const [correctCount, setCorrectCount] = useState(0);
-  const [isFinished, setIsFinished] = useState(false);
+  const [validated, setValidated] = useState(false);
 
   const currentStatement = block.statements[currentIndex];
+  const isLast = currentIndex + 1 >= block.statements.length;
 
-  const handleAnswer = (choice: boolean) => {
-    if (feedback !== null || isFinished || !currentStatement) return;
+  const handleSelect = (choice: boolean) => {
+    if (checkedCurrent || validated || !currentStatement) return;
+    setSelected(choice);
+  };
 
-    const hit = choice === currentStatement.isTrue;
+  const handleCheck = () => {
+    if (selected === null || !currentStatement || checkedCurrent) return;
+    const hit = selected === currentStatement.isTrue;
     setFeedback(hit ? 'correct' : 'wrong');
-
-    if (hit) {
-      setCorrectCount(prev => prev + 1);
+    setCheckedCurrent(true);
+    const nextCorrect = correctCount + (hit ? 1 : 0);
+    if (hit) setCorrectCount(nextCorrect);
+    if (isLast) {
+      setValidated(true);
+      onComplete?.(nextCorrect, block.statements.length);
     }
+  };
 
-    setTimeout(() => {
-      setFeedback(null);
-      if (currentIndex + 1 < block.statements.length) {
-        setCurrentIndex(prev => prev + 1);
-      } else {
-        setIsFinished(true);
-        if (onComplete) {
-          const totalHits = hit ? correctCount + 1 : correctCount;
-          onComplete(totalHits === block.statements.length, Math.round((totalHits / block.statements.length) * 100));
-        }
-      }
-    }, 700);
+  const handleNextStatement = () => {
+    if (!checkedCurrent || isLast) return;
+    setCurrentIndex(prev => prev + 1);
+    setSelected(null);
+    setCheckedCurrent(false);
+    setFeedback(null);
   };
 
   return (
@@ -914,7 +1184,7 @@ const TrueFalseRushPlayer: React.FC<{
         </span>
       </div>
 
-      {!isFinished && currentStatement ? (
+      {currentStatement && (
         <div
           className={`relative min-h-[180px] p-6 rounded-2xl border transition-all duration-300 flex flex-col justify-between shadow-xl ${
             feedback === 'correct'
@@ -924,7 +1194,6 @@ const TrueFalseRushPlayer: React.FC<{
               : 'bg-zinc-800/90 border-zinc-700'
           }`}
         >
-          {/* Real-time color flash indicator */}
           {feedback && (
             <div className={`absolute top-3 right-3 text-xs font-bold px-2 py-0.5 rounded-full ${
               feedback === 'correct' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white'
@@ -934,38 +1203,61 @@ const TrueFalseRushPlayer: React.FC<{
           )}
 
           <p className="text-base sm:text-lg font-semibold text-zinc-100 my-auto text-center leading-relaxed">
-            "{currentStatement.statement}"
+            "<MathText text={currentStatement.statement} />"
           </p>
 
-          {/* Swipe Buttons (Left = Falso, Right = Verdadero) */}
           <div className="grid grid-cols-2 gap-4 mt-6">
             <button
               type="button"
-              onClick={() => handleAnswer(false)}
-              className="py-3 px-4 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 active:bg-rose-600 text-rose-300 font-bold text-sm border border-rose-500/40 transition-all flex items-center justify-center gap-2"
+              onClick={() => handleSelect(false)}
+              disabled={checkedCurrent}
+              className={`py-3 px-4 rounded-xl font-bold text-sm border transition-all flex items-center justify-center gap-2 disabled:opacity-80 ${
+                selected === false
+                  ? 'bg-rose-600 text-white border-rose-400'
+                  : 'bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border-rose-500/40'
+              }`}
             >
               <X className="w-5 h-5" />
-              ← Falso (Deslizar Izq)
+              Falso
             </button>
             <button
               type="button"
-              onClick={() => handleAnswer(true)}
-              className="py-3 px-4 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 active:bg-emerald-600 text-emerald-300 font-bold text-sm border border-emerald-500/40 transition-all flex items-center justify-center gap-2"
+              onClick={() => handleSelect(true)}
+              disabled={checkedCurrent}
+              className={`py-3 px-4 rounded-xl font-bold text-sm border transition-all flex items-center justify-center gap-2 disabled:opacity-80 ${
+                selected === true
+                  ? 'bg-emerald-600 text-white border-emerald-400'
+                  : 'bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border-emerald-500/40'
+              }`}
             >
-              Verdadero (Deslizar Der) →
+              Verdadero
               <Check className="w-5 h-5" />
             </button>
           </div>
         </div>
-      ) : (
-        <div className="p-6 bg-zinc-800/80 rounded-2xl border border-zinc-700 text-center space-y-2">
-          <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto" />
-          <h4 className="text-base font-bold text-zinc-100">¡Ráfaga V/F Finalizada!</h4>
-          <p className="text-xs text-zinc-300">
-            Aciertos: <span className="font-bold text-emerald-400">{correctCount}</span> de {block.statements.length}
-          </p>
-        </div>
       )}
+
+      {checkedCurrent && !isLast && (
+        <button
+          type="button"
+          onClick={handleNextStatement}
+          className="w-full px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-bold rounded-xl"
+        >
+          Siguiente afirmación
+        </button>
+      )}
+
+      <BlockActions
+        requiresCheck
+        canCheck={selected !== null}
+        checked={checkedCurrent}
+        isCorrect={feedback === 'correct' ? true : feedback === 'wrong' ? false : null}
+        onCheck={handleCheck}
+        onNext={onNext}
+        canAdvance={validated}
+        nextLabel={nextLabel}
+        checkLabel="Comprobar"
+      />
     </div>
   );
 };
@@ -973,19 +1265,16 @@ const TrueFalseRushPlayer: React.FC<{
 // 9. Slider Estimador with Tolerance
 const SliderEstimatorPlayer: React.FC<{
   block: SliderEstimatorBlockData;
-  onComplete?: (c: boolean, p: number) => void;
-}> = ({ block, onComplete }) => {
+} & PlayerNav> = ({ block, onComplete, onNext, nextLabel }) => {
   const [val, setVal] = useState<number>(Math.round((block.min + block.max) / 2));
   const [submitted, setSubmitted] = useState(false);
 
   const diff = Math.abs(val - block.correctValue);
   const isWithinTolerance = diff <= (block.tolerance || 1);
 
-  const handleSubmit = () => {
+  const handleCheck = () => {
     setSubmitted(true);
-    if (onComplete) {
-      onComplete(isWithinTolerance, isWithinTolerance ? 100 : Math.max(0, 50 - diff * 5));
-    }
+    onComplete?.(isWithinTolerance ? 1 : 0, 1);
   };
 
   return (
@@ -994,19 +1283,25 @@ const SliderEstimatorPlayer: React.FC<{
         <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
           Slider Estimador
         </span>
-        <h4 className="text-sm font-bold text-zinc-100 mt-0.5">{block.prompt}</h4>
+        <h4 className="text-sm font-bold text-zinc-100 mt-0.5"><MathText text={block.prompt} /></h4>
       </div>
 
-      <div className="p-4 bg-zinc-950/60 rounded-xl border border-zinc-800 space-y-4">
-        {/* Dynamic Display Value */}
+      <div className={`p-4 rounded-xl border space-y-4 ${
+        submitted
+          ? isWithinTolerance
+            ? 'bg-emerald-950/40 border-emerald-500'
+            : 'bg-rose-950/40 border-rose-500'
+          : 'bg-zinc-950/60 border-zinc-800'
+      }`}>
         <div className="text-center">
-          <span className="text-3xl sm:text-4xl font-black font-mono text-indigo-400">
+          <span className={`text-3xl sm:text-4xl font-black font-mono ${
+            submitted ? (isWithinTolerance ? 'text-emerald-400' : 'text-rose-400') : 'text-indigo-400'
+          }`}>
             {val}
           </span>
           <span className="ml-1.5 text-sm text-zinc-400">{block.unit}</span>
         </div>
 
-        {/* Range Slider */}
         <input
           type="range"
           min={block.min}
@@ -1024,7 +1319,7 @@ const SliderEstimatorPlayer: React.FC<{
         </div>
       </div>
 
-      {submitted ? (
+      {submitted && (
         <div className={`p-3 rounded-xl border text-xs ${
           isWithinTolerance 
             ? 'bg-emerald-950/40 border-emerald-500 text-emerald-200' 
@@ -1032,24 +1327,23 @@ const SliderEstimatorPlayer: React.FC<{
         }`}>
           <div className="font-bold flex items-center gap-1.5">
             {isWithinTolerance ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <AlertCircle className="w-4 h-4 text-rose-400" />}
-            {isWithinTolerance ? '¡Estimación precisa dentro del rango permitido!' : 'Tu estimación estuvo alejada del valor real.'}
+            {isWithinTolerance ? 'Estimación precisa dentro del rango permitido.' : 'Tu estimación estuvo alejada del valor real.'}
           </div>
           <p className="text-zinc-300 mt-1">
             Valor real: <span className="font-bold font-mono">{block.correctValue} {block.unit}</span> (tolerancia: ±{block.tolerance} {block.unit}).
           </p>
-          <p className="text-zinc-400 mt-0.5">{block.explanation}</p>
-        </div>
-      ) : (
-        <div className="flex justify-end">
-          <button
-            type="button"
-            onClick={handleSubmit}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl shadow-md transition-all"
-          >
-            Confirmar Estimación
-          </button>
+          <p className="text-zinc-400 mt-0.5"><MathText text={block.explanation} /></p>
         </div>
       )}
+      <BlockActions
+        requiresCheck
+        checked={submitted}
+        isCorrect={submitted ? isWithinTolerance : null}
+        onCheck={handleCheck}
+        onNext={onNext}
+        nextLabel={nextLabel}
+        checkLabel="Comprobar"
+      />
     </div>
   );
 };

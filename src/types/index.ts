@@ -1,4 +1,6 @@
 export type ContentType = 'material' | 'game';
+export type EducatorKind = 'tutor' | 'professor';
+export type EducatorStatus = 'pending' | 'verified';
 
 export interface User {
   id: string;
@@ -12,12 +14,37 @@ export interface User {
   career: string;
   currentSemester: number; // 1 to 10
   enrolledSubjects: string[];
-  isIncognito: boolean; // Hides nickname and scores in public rankings
+  isIncognito: boolean; // Hides nickname in the course ranking
   bio: string;
-  rpPoints: number; // League Points
   streakDays: number;
+  lastAccessDate?: string;
   role: 'user' | 'admin';
   createdAt: string;
+  updatedAt?: string;
+  isGuest?: boolean;
+  mustVerifyEmail?: boolean;
+  emailVerified?: boolean;
+  educatorKind?: EducatorKind;
+  educatorUniversity?: string;
+  educatorStatus?: EducatorStatus;
+}
+
+export interface PublicUser {
+  id: string;
+  username: string;
+  fullName: string;
+  avatarUrl?: string;
+  bio?: string;
+  university?: string;
+  career?: string;
+  currentSemester?: number;
+  streakDays?: number;
+  bannerValue?: string;
+  isIncognito?: boolean;
+  role?: 'user' | 'admin';
+  educatorKind?: EducatorKind;
+  educatorUniversity?: string;
+  educatorStatus?: EducatorStatus;
 }
 
 export interface University {
@@ -25,19 +52,23 @@ export interface University {
   name: string;
   acronym: string;
   country: string;
+  order?: number;
 }
 
 export interface Career {
   id: string;
   name: string;
-  universityId: string;
+  universityId?: string;
+  universityIds?: string[];
+  order?: number;
 }
 
 export interface Subject {
   id: string;
   name: string;
-  careerId: string;
-  semester: number;
+  careerId?: string;
+  semester?: number;
+  order?: number;
 }
 
 export interface PendingRequest {
@@ -56,6 +87,7 @@ export interface Folder {
   name: string;
   color: string;
   icon?: string;
+  ownerId?: string;
 }
 
 // Blocks Definitions
@@ -76,6 +108,8 @@ export interface BaseBlock {
   type: BlockType;
   title?: string;
   imageUrl?: string;
+  basePoints?: number;
+  estimatedTimeSeconds?: number;
 }
 
 export interface ContentCardBlockData extends BaseBlock {
@@ -122,7 +156,14 @@ export interface FillBlankBlockData extends BaseBlock {
   mode: 'multiple_choice' | 'free_text';
   options: string[]; // For multiple choice A, B, C, D
   correctAnswer: string; // Case-insensitive validation
+  correctOptionIndex?: number;
   explanation?: string;
+}
+
+export interface ContentCategory {
+  id: string;
+  name: string;
+  color?: string;
 }
 
 export interface SwipeClassifyItem {
@@ -132,6 +173,7 @@ export interface SwipeClassifyItem {
 }
 
 export interface SwipeClassifyBlockData extends BaseBlock {
+  category?: string;
   type: 'swipe_classify';
   prompt: string;
   categories: string[]; // 2 for swipe left/right, >2 for boxes below
@@ -155,6 +197,7 @@ export interface HotspotPoint {
   xPercent: number;
   yPercent: number;
   stepOrder?: number;
+  radiusPercent?: number;
 }
 
 export interface HotspotBlockData extends BaseBlock {
@@ -206,23 +249,27 @@ export interface StudyItemCard {
   title: string;
   description: string;
   contentType: ContentType;
+  visibility?: 'public' | 'private';
   accessCode: string; // 6-character unique code e.g. "CALC-92"
   authorId: string;
   authorUsername: string;
   authorUniversity: string;
   authorAvatar?: string;
   subjectName: string;
+  category?: string;
   universityName: string;
   semester: number;
   coverType: 'gradient' | 'image' | 'color';
   coverValue: string;
   rating: number; // 1.0 to 5.0
   ratingsCount: number;
-  activePlayers: number; // 🎮
+  ratingSum?: number;
+  ratingsByUser?: Record<string, number>;
   isFavorite: boolean;
   folderId?: string;
   blocks: InteractiveBlock[];
   createdAt: string;
+  publishedCourses?: { code: string; name: string; visibility: 'public' | 'private' }[];
 }
 
 export interface SoloGameSession {
@@ -235,6 +282,10 @@ export interface SoloGameSession {
   avgResponseTimeSeconds: number;
   playedAt: string;
   score: number;
+  userId?: string;
+  username?: string;
+  avatarUrl?: string;
+  isIncognito?: boolean;
 }
 
 export interface RoomPlayer {
@@ -243,49 +294,35 @@ export interface RoomPlayer {
   avatarUrl?: string;
   isIncognito: boolean;
   score: number;
-  roundScore: number;
-  isReady: boolean;
+  currentBlockIndex: number;
+  finished: boolean;
+  finishedAt?: number;
   isHost: boolean;
-  hasAnsweredCurrentRound: boolean;
-  speedBonusApplied: boolean;
+  roundScore?: number;
+  isReady?: boolean;
+  hasAnsweredCurrentRound?: boolean;
+  speedBonusApplied?: boolean;
 }
 
 export interface MultiplayerRoom {
   id: string;
   roomCode: string; // 4 characters e.g. "7K2M"
+  hostId: string;
   name: string;
   gameId: string;
   gameTitle: string;
-  isPrivate: boolean; // Private requires 4-char code, doesn't grant RP. Public grants RP.
-  format: '1v1' | 'group'; // Duelo 1v1 o Sala 2-5 jugadores
+  isPrivate: boolean;
+  format: '1v1' | 'group';
   maxPlayers: number; // 2 to 5
-  players: RoomPlayer[];
-  state: 'lobby' | 'countdown' | 'in_round' | 'round_leaderboard' | 'match_ended';
+  players: Record<string, RoomPlayer>;
+  state: 'lobby' | 'playing' | 'finished';
   currentQuestionIndex: number;
   totalQuestions: number;
+  totalBlocks: number;
   secondsRemainingInRound: number;
   roundStartTime: number;
-}
-
-export interface TournamentMatch {
-  id: string;
-  roundName: string; // 'Cuartos de Final' | 'Semifinal' | 'Gran Final'
-  player1: { id: string; username: string; score?: number };
-  player2: { id: string; username: string; score?: number };
-  winnerId?: string;
-  status: 'pending' | 'live' | 'finished';
-}
-
-export interface Tournament {
-  id: string;
-  title: string;
-  subject: string;
-  date: string;
-  exactTime: string;
-  prizeDescription: string;
-  status: 'upcoming' | 'live' | 'completed';
-  participantsCount: number;
-  bracket: TournamentMatch[];
+  createdAt: string;
+  startedAt?: number;
 }
 
 export interface VisualTemplate {

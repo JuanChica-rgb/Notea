@@ -1,0 +1,57 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAccount() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    function isOwner(userId) {
+      return isAccount() && request.auth.uid == userId;
+    }
+
+    function isImage() {
+      return request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/jpeg|image/png|image/webp|image/gif');
+    }
+
+    function isCourseFile() {
+      return request.resource.size < 10 * 1024 * 1024
+        && (
+          request.resource.contentType.matches('image/jpeg|image/png|image/webp|image/gif')
+          || request.resource.contentType == 'application/pdf'
+        );
+    }
+
+    match /avatars/{userId}/{fileName} {
+      allow get: if true;
+      allow list: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isImage() && fileName.size() < 180;
+      allow delete: if isOwner(userId);
+    }
+
+    match /banners/{userId}/{fileName} {
+      allow get: if true;
+      allow list: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isImage() && fileName.size() < 180;
+      allow delete: if isOwner(userId);
+    }
+
+    match /content/{userId}/{fileName} {
+      allow get: if true;
+      allow list: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isImage() && fileName.size() < 180;
+      allow delete: if isOwner(userId);
+    }
+
+    match /courses/{code}/{userId}/{fileName} {
+      allow get: if true;
+      allow list: if isOwner(userId);
+      allow create: if isOwner(userId)
+        && code.size() == 4
+        && isCourseFile()
+        && fileName.size() < 180;
+      allow delete: if isOwner(userId);
+    }
+  }
+}

@@ -1,357 +1,248 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { ClassroomCard } from '../common/ClassroomCard';
-import { ContentType } from '../../types';
-import { 
-  Gamepad2, 
-  BookOpen, 
-  UserCheck, 
-  Star, 
-  FolderPlus, 
-  Folder as FolderIcon, 
-  Filter, 
-  Plus, 
-  Search,
-  Sparkles,
-  Layers
-} from 'lucide-react';
+import { Plus } from 'lucide-react';
+
+const FOLDER_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4'];
 
 export const MyLibraryView: React.FC = () => {
-  const { 
-    user, 
-    cards, 
-    folders, 
-    addFolder, 
-    setCurrentView, 
-    setEditorContentType, 
-    setEditingCardId 
+  const {
+    user,
+    cards,
+    folders,
+    addFolder,
+    updateFolder,
+    deleteFolder,
   } = useApp();
 
-  // Content Type Filter: 'material' or 'game'
-  const [contentType, setContentType] = useState<ContentType>('material');
-
-  // Quick Filters: 'all' | 'created_by_me' | 'favorites'
-  const [quickFilter, setQuickFilter] = useState<'all' | 'created_by_me' | 'favorites'>('all');
-
-  // Selected folder filter (optional)
+  const [quickFilter, setQuickFilter] = useState<'created_by_me' | 'favorites'>('created_by_me');
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
-
-  // New folder creation state
   const [isAddingFolder, setIsAddingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
-  const [newFolderColor, setNewFolderColor] = useState('#6366f1');
+  const [newFolderColor, setNewFolderColor] = useState(FOLDER_COLORS[0]);
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editColor, setEditColor] = useState(FOLDER_COLORS[0]);
+  const [menuPoint, setMenuPoint] = useState<{ x: number; y: number } | null>(null);
 
-  // Search input within library
-  const [searchQuery, setSearchQuery] = useState('');
+  const userFolders = folders.filter(folder => !folder.ownerId || folder.ownerId === user.id);
+  const selectedFolder = userFolders.find(folder => folder.id === selectedFolderId) ?? null;
+  const editingFolder = userFolders.find(folder => folder.id === editingFolderId) ?? null;
 
-  // Apply filters
+  useEffect(() => {
+    if (!editingFolderId) return;
+    const close = () => {
+      setEditingFolderId(null);
+      setMenuPoint(null);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [editingFolderId]);
+
   const filteredCards = cards.filter(card => {
-    // 1. Content Type Filter (Material vs Juegos)
-    if (card.contentType !== contentType) return false;
-
-    // 2. Quick Filters
+    if (selectedFolder) return card.folderId === selectedFolder.id;
     if (quickFilter === 'created_by_me' && card.authorId !== user.id) return false;
     if (quickFilter === 'favorites' && !card.isFavorite) return false;
-
-    // 3. Folder Filter
-    if (selectedFolderId && card.folderId !== selectedFolderId) return false;
-
-    // 4. Search query
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      const matchTitle = card.title.toLowerCase().includes(q);
-      const matchSubject = card.subjectName.toLowerCase().includes(q);
-      const matchCode = card.accessCode.toLowerCase().includes(q);
-      const matchUniv = card.universityName.toLowerCase().includes(q);
-      if (!matchTitle && !matchSubject && !matchCode && !matchUniv) return false;
-    }
-
     return true;
   });
 
-  const handleCreateFolder = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCreateFolder = (event: React.FormEvent) => {
+    event.preventDefault();
     if (!newFolderName.trim()) return;
     addFolder(newFolderName.trim(), newFolderColor);
     setNewFolderName('');
     setIsAddingFolder(false);
   };
 
-  const handleQuickCreate = () => {
-    setEditingCardId(null);
-    setEditorContentType(contentType);
-    setCurrentView('editor');
+  const openFolderEditor = (event: React.MouseEvent, folderId: string, name: string, color: string) => {
+    event.preventDefault();
+    setEditingFolderId(folderId);
+    setEditName(name);
+    setEditColor(color || FOLDER_COLORS[0]);
+    setMenuPoint({
+      x: Math.min(event.clientX, window.innerWidth - 280),
+      y: Math.min(event.clientY, window.innerHeight - 180),
+    });
   };
 
-  return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-8">
-      {/* Top Banner & Welcome Info */}
-      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-6 bg-gradient-to-r from-indigo-950/40 via-zinc-900 to-zinc-900 border border-zinc-800 rounded-3xl">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">
-              Mi Biblioteca Académica
-            </span>
-            <span className="text-zinc-500">•</span>
-            <span className="text-xs text-zinc-400">{user.university}</span>
-          </div>
-          <h1 className="text-2xl sm:text-3xl font-bold font-display text-zinc-100 mt-1">
-            Hola, {user.fullName.split(' ')[0]} 👋
-          </h1>
-          <p className="text-sm text-zinc-400 mt-1 max-w-xl">
-            Explora tus cuadernos interactivos, fichas de estudio y desafíos de ráfaga para tus materias de {user.currentSemester}.° semestre.
-          </p>
-        </div>
+  const saveFolderEdits = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingFolder) return;
+    const trimmed = editName.trim();
+    if (!trimmed) return;
+    if (trimmed !== editingFolder.name || editColor !== editingFolder.color) {
+      void updateFolder(editingFolder.id, trimmed, editColor);
+    }
+    setEditingFolderId(null);
+    setMenuPoint(null);
+  };
 
+  const handleDeleteFolder = () => {
+    if (!selectedFolder) return;
+    if (!window.confirm(`¿Eliminar la carpeta "${selectedFolder.name}"? Los contenidos no se borrarán, solo se desvincularán.`)) return;
+    void deleteFolder(selectedFolder.id);
+    setSelectedFolderId(null);
+  };
+
+  const emptyMessage = selectedFolder
+    ? 'Esta carpeta está vacía.'
+    : quickFilter === 'favorites'
+      ? 'Todavía no tienes favoritos.'
+      : 'Todavía no tienes cuadernos ni juegos.';
+
+  const folderClass = (active: boolean) =>
+    `inline-flex items-center gap-2 px-2.5 py-1 rounded-lg text-sm ${
+      active ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'
+    }`;
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-5">
+      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          onClick={handleQuickCreate}
-          className="px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm shadow-lg shadow-indigo-600/25 flex items-center gap-2 transition-all flex-shrink-0"
+          onClick={() => { setSelectedFolderId(null); setQuickFilter('created_by_me'); }}
+          className={folderClass(!selectedFolder && quickFilter === 'created_by_me')}
         >
-          <Plus className="w-4 h-4" />
-          {contentType === 'material' ? 'Crear Nuevo Cuaderno' : 'Crear Nuevo Juego'}
+          Míos
         </button>
-      </div>
-
-      {/* FILTER CONTROLS */}
-      <div className="space-y-4">
-        {/* 1. Main Content Type Toggle: Juegos vs Material de estudio */}
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center p-1.5 bg-zinc-900 border border-zinc-800 rounded-2xl">
+        <button
+          type="button"
+          onClick={() => { setSelectedFolderId(null); setQuickFilter('favorites'); }}
+          className={folderClass(!selectedFolder && quickFilter === 'favorites')}
+        >
+          Favoritos
+        </button>
+        {userFolders.map(folder => {
+          const selected = selectedFolder?.id === folder.id;
+          return (
             <button
+              key={folder.id}
               type="button"
               onClick={() => {
-                setContentType('material');
-                setSelectedFolderId(null);
+                setSelectedFolderId(selected ? null : folder.id);
+                if (selected) setQuickFilter('created_by_me');
               }}
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${
-                contentType === 'material'
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20'
-                  : 'text-zinc-400 hover:text-zinc-200'
-              }`}
+              onContextMenu={event => openFolderEditor(event, folder.id, folder.name, folder.color)}
+              className={folderClass(selected)}
             >
-              <BookOpen className="w-4 h-4" />
-              Material de Estudio (Cuadernos)
+              <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: folder.color || '#6366f1' }} />
+              {folder.name}
             </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setContentType('game');
-                setSelectedFolderId(null);
-              }}
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${
-                contentType === 'game'
-                  ? 'bg-purple-600 text-white shadow-md shadow-purple-600/20'
-                  : 'text-zinc-400 hover:text-zinc-200'
-              }`}
-            >
-              <Gamepad2 className="w-4 h-4" />
-              Juegos Competitivos (Ráfagas)
-            </button>
-          </div>
-
-          {/* Search Box */}
-          <div className="relative w-full sm:w-64">
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Filtrar por título, materia..."
-              className="w-full pl-9 pr-4 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
-            />
-            <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
-          </div>
-        </div>
-
-        {/* 2. Quick Filters: "Creados por mí" and "Favoritos" */}
-        <div className="flex flex-wrap items-center gap-2 pt-1">
-          <span className="text-xs font-semibold text-zinc-400 mr-2 flex items-center gap-1.5">
-            <Filter className="w-3.5 h-3.5" />
-            Filtros Rápidos:
-          </span>
-
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => setIsAddingFolder(open => !open)}
+          className="inline-flex items-center gap-1 px-2.5 py-1 text-sm text-zinc-500 hover:text-zinc-200"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          Nueva carpeta
+        </button>
+        {selectedFolder && (
           <button
             type="button"
-            onClick={() => setQuickFilter('all')}
-            className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
-              quickFilter === 'all'
-                ? 'bg-zinc-800 border-zinc-600 text-zinc-100 shadow-sm'
-                : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-            }`}
+            onClick={handleDeleteFolder}
+            className="px-2.5 py-1 text-sm text-zinc-500 hover:text-rose-400"
           >
-            Todos
+            Eliminar carpeta
           </button>
-
-          <button
-            type="button"
-            onClick={() => setQuickFilter(quickFilter === 'created_by_me' ? 'all' : 'created_by_me')}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
-              quickFilter === 'created_by_me'
-                ? 'bg-indigo-950/60 border-indigo-500/60 text-indigo-300 shadow-sm'
-                : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <UserCheck className="w-3.5 h-3.5 text-indigo-400" />
-            Creados por mí
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setQuickFilter(quickFilter === 'favorites' ? 'all' : 'favorites')}
-            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
-              quickFilter === 'favorites'
-                ? 'bg-amber-950/60 border-amber-500/60 text-amber-300 shadow-sm'
-                : 'bg-zinc-900/60 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            <Star className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
-            Favoritos
-          </button>
-        </div>
-
-        {/* 3. Carpetas Personalizadas */}
-        <div className="p-4 bg-zinc-900/50 border border-zinc-800/80 rounded-2xl space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <FolderIcon className="w-4 h-4 text-indigo-400" />
-              <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                Carpetas Personalizadas (Organiza por materias o parciales)
-              </h3>
-            </div>
-
-            {!isAddingFolder && (
-              <button
-                type="button"
-                onClick={() => setIsAddingFolder(true)}
-                className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Nueva Carpeta
-              </button>
-            )}
-          </div>
-
-          {/* Add Folder Form */}
-          {isAddingFolder && (
-            <form onSubmit={handleCreateFolder} className="flex flex-wrap items-center gap-2 p-2 bg-zinc-900 border border-zinc-700 rounded-xl">
-              <input
-                type="text"
-                value={newFolderName}
-                onChange={e => setNewFolderName(e.target.value)}
-                placeholder="Nombre de la carpeta (ej. Parcial 1, Fórmulas)..."
-                className="flex-1 min-w-[200px] px-3 py-1.5 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
-                autoFocus
-              />
-              {/* Color picker pills */}
-              <div className="flex items-center gap-1.5">
-                {['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4'].map(color => (
-                  <button
-                    key={color}
-                    type="button"
-                    onClick={() => setNewFolderColor(color)}
-                    style={{ backgroundColor: color }}
-                    className={`w-5 h-5 rounded-full border-2 transition-transform ${
-                      newFolderColor === color ? 'scale-110 border-white' : 'border-transparent'
-                    }`}
-                  />
-                ))}
-              </div>
-              <button
-                type="submit"
-                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg"
-              >
-                Guardar
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsAddingFolder(false)}
-                className="px-2.5 py-1.5 bg-zinc-800 text-zinc-400 hover:text-zinc-200 text-xs rounded-lg"
-              >
-                Cancelar
-              </button>
-            </form>
-          )}
-
-          {/* Folder Chips */}
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setSelectedFolderId(null)}
-              className={`px-3 py-1 rounded-xl text-xs font-medium border transition-colors ${
-                selectedFolderId === null
-                  ? 'bg-zinc-800 border-zinc-600 text-zinc-100'
-                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-300'
-              }`}
-            >
-              Todas las carpetas
-            </button>
-            {folders.map(folder => {
-              const isSelected = selectedFolderId === folder.id;
-              const count = cards.filter(c => c.folderId === folder.id && c.contentType === contentType).length;
-              return (
-                <button
-                  key={folder.id}
-                  type="button"
-                  onClick={() => setSelectedFolderId(isSelected ? null : folder.id)}
-                  className={`flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-medium border transition-all ${
-                    isSelected
-                      ? 'bg-zinc-800 border-zinc-500 text-zinc-100 shadow-sm'
-                      : 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  <span 
-                    className="w-2.5 h-2.5 rounded-full" 
-                    style={{ backgroundColor: folder.color }} 
-                  />
-                  <span>{folder.name}</span>
-                  <span className="text-[10px] px-1 rounded bg-zinc-800 text-zinc-400 font-mono">
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {/* CARDS GRID (Google Classroom Style) */}
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-bold font-display text-zinc-100 flex items-center gap-2">
-            <Layers className="w-4 h-4 text-indigo-400" />
-            {contentType === 'material' ? 'Cuadernos y Materiales de Estudio' : 'Juegos y Ráfagas Competitivas'}
-            <span className="text-xs font-normal text-zinc-400 font-mono">
-              ({filteredCards.length} disponibles)
-            </span>
-          </h2>
-        </div>
-
-        {filteredCards.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {filteredCards.map(card => (
-              <ClassroomCard key={card.id} card={card} />
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-16 px-4 bg-zinc-900/40 border border-dashed border-zinc-800 rounded-3xl">
-            <Sparkles className="w-10 h-10 text-zinc-600 mx-auto mb-3" />
-            <h3 className="text-base font-semibold text-zinc-300">
-              No hay {contentType === 'material' ? 'materiales' : 'juegos'} que coincidan con estos filtros
-            </h3>
-            <p className="text-xs text-zinc-500 mt-1 max-w-sm mx-auto">
-              Intenta cambiar los filtros o crea tu propio contenido interactivo ahora mismo.
-            </p>
-            <button
-              type="button"
-              onClick={handleQuickCreate}
-              className="mt-4 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl transition-colors"
-            >
-              + Crear {contentType === 'material' ? 'Cuaderno' : 'Juego'}
-            </button>
-          </div>
         )}
       </div>
+
+      {isAddingFolder && (
+        <form onSubmit={handleCreateFolder} className="flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={newFolderName}
+            onChange={event => setNewFolderName(event.target.value)}
+            placeholder="Nombre de la carpeta"
+            className="px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-lg text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-600"
+            autoFocus
+          />
+          <div className="flex items-center gap-1.5">
+            {FOLDER_COLORS.map(color => (
+              <button
+                key={color}
+                type="button"
+                onClick={() => setNewFolderColor(color)}
+                style={{ backgroundColor: color }}
+                className={`w-4 h-4 rounded-full ${newFolderColor === color ? 'ring-2 ring-white ring-offset-2 ring-offset-zinc-950' : ''}`}
+                aria-label="Color de la carpeta"
+              />
+            ))}
+          </div>
+          <button type="submit" className="px-3 py-1.5 text-sm font-semibold text-zinc-100">
+            Guardar
+          </button>
+          <button type="button" onClick={() => setIsAddingFolder(false)} className="px-2 py-1.5 text-sm text-zinc-500">
+            Cancelar
+          </button>
+        </form>
+      )}
+
+      {editingFolder && menuPoint && (
+        <>
+          <button
+            type="button"
+            aria-label="Cerrar edición"
+            className="fixed inset-0 z-40 cursor-default"
+            onClick={() => { setEditingFolderId(null); setMenuPoint(null); }}
+          />
+          <form
+          onSubmit={saveFolderEdits}
+          className="fixed z-50 w-64 p-3 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl space-y-3"
+          style={{ left: menuPoint.x, top: menuPoint.y }}
+          onMouseDown={event => event.stopPropagation()}
+        >
+          <p className="text-xs font-semibold text-zinc-300">Editar carpeta</p>
+          <input
+            type="text"
+            value={editName}
+            onChange={event => setEditName(event.target.value)}
+            className="w-full px-3 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-sm text-zinc-100 focus:outline-none focus:border-zinc-600"
+            aria-label="Nombre de la carpeta"
+            autoFocus
+          />
+          <div className="flex items-center gap-1.5">
+            {FOLDER_COLORS.map(color => (
+              <button
+                key={color}
+                type="button"
+                onClick={() => setEditColor(color)}
+                style={{ backgroundColor: color }}
+                className={`w-4 h-4 rounded-full ${editColor === color ? 'ring-2 ring-white ring-offset-2 ring-offset-zinc-900' : ''}`}
+                aria-label="Color de la carpeta"
+              />
+            ))}
+          </div>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => { setEditingFolderId(null); setMenuPoint(null); }}
+              className="px-2.5 py-1.5 text-xs text-zinc-400"
+            >
+              Cancelar
+            </button>
+            <button type="submit" className="px-2.5 py-1.5 text-xs font-semibold text-zinc-100">
+              Guardar
+            </button>
+          </div>
+        </form>
+        </>
+      )}
+
+      {filteredCards.length > 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {filteredCards.map(card => (
+            <ClassroomCard key={card.id} card={card} />
+          ))}
+        </div>
+      ) : (
+        <p className="py-16 text-center text-sm text-zinc-500">{emptyMessage}</p>
+      )}
     </div>
   );
 };

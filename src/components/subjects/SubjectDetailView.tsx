@@ -1,134 +1,276 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { ClassroomCard } from '../common/ClassroomCard';
-import { BookOpen, Compass, Search, Filter, Layers, Plus } from 'lucide-react';
+import { BookOpen, Gamepad2, Search } from 'lucide-react';
+import { CatalogSearch } from '../common/CatalogSearch';
+import {
+  isCourseStaff,
+  listenToPosts,
+  listenToPublicCourses,
+  syncCourseMaterials,
+  type Course,
+  type CoursePost,
+} from '../../lib/courses';
+import type { StudyItemCard } from '../../types';
+
+function fold(value: string) {
+  return value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+}
+
+const OPEN_COURSE_KEY = 'notea_open_course';
+const CARD_COURSES_KEY = 'notea_card_courses';
+const FROM_EXPLORE_KEY = 'notea_from';
+
+interface ExploreMaterial {
+  card: StudyItemCard;
+  courses: { code: string; name: string }[];
+}
 
 export const SubjectDetailView: React.FC = () => {
-  const { user, cards, subjects, setCurrentView, setEditorContentType, setEditingCardId } = useApp();
+  const { cards, user, universities, subjects, setActiveCardId, setCurrentView, openAuthModal, authReady } = useApp();
+  const [query, setQuery] = useState('');
+  const [universityFilter, setUniversityFilter] = useState(user.university || '');
+  const [subjectFilter, setSubjectFilter] = useState('');
+  const [handleFilter, setHandleFilter] = useState('');
+  const universityTouched = useRef(false);
+  const [tab, setTab] = useState<'courses' | 'materials'>('courses');
+  const [publicCourses, setPublicCourses] = useState<Course[]>([]);
+  const [postsByCode, setPostsByCode] = useState<Record<string, CoursePost[]>>({});
+  const guest = authReady && user.isGuest;
 
-  const [selectedSubject, setSelectedSubject] = useState<string>(subjects[0]?.name || 'Álgebra Lineal');
-  const [semesterFilter, setSemesterFilter] = useState<number | 'all'>('all');
-  const [search, setSearch] = useState('');
+  useEffect(() => {
+    if (universityTouched.current || !user.university) return;
+    setUniversityFilter(user.university);
+  }, [user.university]);
 
-  const subjectCards = cards.filter(c => {
-    if (selectedSubject && c.subjectName !== selectedSubject) return false;
-    if (semesterFilter !== 'all' && c.semester !== semesterFilter) return false;
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      if (!c.title.toLowerCase().includes(q) && !c.description.toLowerCase().includes(q)) {
-        return false;
+  useEffect(() => {
+    if (guest) return;
+    return listenToPublicCourses(setPublicCourses);
+  }, [guest]);
+
+  const courseKey = publicCourses.map(course => course.code).join(',');
+  const coursesRef = useRef(publicCourses);
+  coursesRef.current = publicCourses;
+
+  useEffect(() => {
+    const courses = coursesRef.current;
+    if (guest || courses.length === 0) return;
+    const stops = courses.map(course => listenToPosts(course.code, posts => {
+      setPostsByCode(current => ({ ...current, [course.code]: posts }));
+      if (isCourseStaff(course, user.id)) void syncCourseMaterials(course, posts);
+    }));
+    return () => stops.forEach(stop => stop());
+  }, [guest, courseKey, user.id]);
+
+  const materials = useMemo(() => {
+    const byId = new Map<string, ExploreMaterial>();
+    for (const card of cards) {
+      if (card.visibility !== 'public') continue;
+      byId.set(card.id, { card, courses: [] });
+    }
+    const attach = (cardId: string, course: { code: string; name: string }) => {
+      const existing = byId.get(cardId);
+      if (!existing || existing.courses.some(item => item.code === course.code)) return;
+      existing.courses.push(course);
+    };
+    for (const course of publicCourses) {
+      const place = { code: course.code, name: course.name };
+      for (const post of postsByCode[course.code] || []) {
+        if (post.cardId) attach(post.cardId, place);
+      }
+      for (const card of cards) {
+        if (card.publishedCourses?.some(item => item.code === course.code)) attach(card.id, place);
       }
     }
-    return true;
+    return [...byId.values()].sort((a, b) => a.card.title.localeCompare(b.card.title, 'es', { sensitivity: 'base' }));
+  }, [cards, publicCourses, postsByCode]);
+
+  const needle = fold(query.trim());
+  const handle = fold(handleFilter.trim().replace(/^@/, ''));
+  const same = (left: string, right: string) => fold(left) === fold(right);
+  const visibleCourses = publicCourses.filter(course => {
+    if (universityFilter && !same(course.university, universityFilter)) return false;
+    if (subjectFilter && !same(course.subjectName, subjectFilter)) return false;
+    const owner = course.members[course.ownerId]?.username || '';
+    if (handle && !fold(owner).includes(handle)) return false;
+    if (!needle) return true;
+    return [course.name, course.code, course.description].some(value => fold(value || '').includes(needle));
+  });
+  const visibleMaterials = materials.filter(item => {
+    const university = item.card.universityName || item.card.authorUniversity;
+    if (universityFilter && !same(university, universityFilter)) return false;
+    if (subjectFilter && !same(item.card.subjectName, subjectFilter)) return false;
+    if (!needle) return true;
+    return [item.card.title, item.card.authorUsername, item.card.accessCode, item.card.description]
+      .some(value => fold(value || '').includes(needle));
   });
 
-  const handleCreateInSubject = () => {
-    setEditingCardId(null);
-    setEditorContentType('material');
-    setCurrentView('editor');
+  const openCourse = (code: string) => {
+    if (guest) {
+      openAuthModal('login');
+      return;
+    }
+    sessionStorage.setItem(OPEN_COURSE_KEY, code);
+    sessionStorage.removeItem(FROM_EXPLORE_KEY);
+    setCurrentView('courses');
+  };
+
+  const openMaterial = (item: ExploreMaterial) => {
+    sessionStorage.removeItem(OPEN_COURSE_KEY);
+    sessionStorage.setItem(CARD_COURSES_KEY, JSON.stringify(item.courses));
+    sessionStorage.setItem(FROM_EXPLORE_KEY, 'explore');
+    setActiveCardId(item.card.id);
+    setCurrentView('content_preview');
+  };
+
+  const tabClass = (active: boolean) =>
+    `px-3 py-1.5 rounded-lg text-sm font-semibold ${active ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-200'}`;
+  const universityItems = universities.map(item => ({ id: item.id, name: item.name }));
+  const subjectItems = subjects.map(item => ({ id: item.id, name: item.name }));
+  const pickUniversity = (name: string) => {
+    universityTouched.current = true;
+    setUniversityFilter(name);
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-6 text-left">
-      {/* Banner */}
-      <div className="p-6 bg-gradient-to-r from-blue-950/40 via-zinc-900 to-zinc-900 border border-zinc-800 rounded-3xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1">
-              <Compass className="w-3.5 h-3.5" />
-              Explorador por Materia
-            </span>
-            <span className="text-zinc-500">•</span>
-            <span className="text-xs text-zinc-400">{user.career}</span>
-          </div>
-          <h1 className="text-2xl font-bold font-display text-zinc-100 mt-1">
-            Materias & Contenidos Académicos
-          </h1>
-          <p className="text-xs text-zinc-400 mt-1 max-w-lg">
-            Navega por las materias oficiales de tu malla curricular y descubre los cuadernos y juegos creados por la comunidad estudiantil.
-          </p>
-        </div>
-
-        <button
-          type="button"
-          onClick={handleCreateInSubject}
-          className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-lg flex items-center gap-2 transition-all flex-shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-          Aportar en esta Materia
-        </button>
+    <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 space-y-6 text-left">
+      <div className="flex gap-1">
+        <button type="button" onClick={() => setTab('courses')} className={tabClass(tab === 'courses')}>Cursos</button>
+        <button type="button" onClick={() => setTab('materials')} className={tabClass(tab === 'materials')}>Materiales</button>
       </div>
-
-      {/* Selectors and Filters */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        {/* Subject Pills */}
-        <div className="flex flex-wrap gap-2 flex-1">
-          {subjects.map(s => {
-            const isSelected = selectedSubject === s.name;
-            const count = cards.filter(c => c.subjectName === s.name).length;
-            return (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => setSelectedSubject(s.name)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
-                  isSelected
-                    ? 'bg-blue-600 text-white border-blue-500 shadow-md'
-                    : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                {s.name}
-                <span className="ml-1.5 px-1 rounded bg-black/30 text-[10px] font-mono">
-                  {count}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Search */}
-        <div className="relative w-full sm:w-60">
-          <input
-            type="text"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Buscar en la materia..."
-            className="w-full pl-9 pr-4 py-1.5 bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-blue-500"
-          />
-          <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
-        </div>
-      </div>
-
-      {/* Cards Display */}
-      <div>
-        <h2 className="text-sm font-bold uppercase tracking-wider text-zinc-400 mb-4 flex items-center gap-2">
-          <Layers className="w-4 h-4 text-blue-400" />
-          Contenidos en {selectedSubject} ({subjectCards.length})
-        </h2>
-
-        {subjectCards.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {subjectCards.map(card => (
-              <ClassroomCard key={card.id} card={card} />
-            ))}
+      {!guest && (
+        <div className="space-y-3">
+          <div className={`grid gap-3 ${tab === 'courses' ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
+            <div className="space-y-1">
+              <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Universidad</p>
+              <CatalogSearch
+                placeholder="Buscar universidad"
+                selected={universityFilter}
+                items={universityItems}
+                emptyLabel="No hay universidades con ese nombre."
+                onSelect={pickUniversity}
+                onClear={() => pickUniversity('')}
+              />
+            </div>
+            <div className="space-y-1">
+              <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Materia</p>
+              <CatalogSearch
+                placeholder="Buscar materia"
+                selected={subjectFilter}
+                items={subjectItems}
+                emptyLabel="No hay materias con ese nombre."
+                onSelect={setSubjectFilter}
+                onClear={() => setSubjectFilter('')}
+              />
+            </div>
+            {tab === 'courses' && (
+              <div className="space-y-1">
+                <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Usuario</p>
+                <input
+                  type="search"
+                  value={handleFilter}
+                  onChange={event => setHandleFilter(event.target.value)}
+                  placeholder="@usuario"
+                  className="w-full px-3 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl text-base text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-600"
+                />
+              </div>
+            )}
           </div>
-        ) : (
-          <div className="text-center py-16 bg-zinc-900/40 border border-dashed border-zinc-800 rounded-3xl">
-            <BookOpen className="w-10 h-10 text-zinc-600 mx-auto mb-2" />
-            <h3 className="text-sm font-semibold text-zinc-300">
-              Aún no hay cuadernos en {selectedSubject}
-            </h3>
-            <p className="text-xs text-zinc-500 mt-1">Sé el primero en crear y compartir un cuaderno o juego interactivo.</p>
-            <button
-              type="button"
-              onClick={handleCreateInSubject}
-              className="mt-3 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-xl"
-            >
-              + Crear Cuaderno en {selectedSubject}
-            </button>
+          <div className="relative">
+            <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="search"
+              value={query}
+              onChange={event => setQuery(event.target.value)}
+              placeholder={tab === 'courses' ? 'Buscar por nombre' : 'Buscar cuaderno o juego'}
+              className="w-full pl-10 pr-3 py-2.5 bg-zinc-900 border border-zinc-800 rounded-lg text-base text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-600"
+            />
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {guest ? (
+        <div className="space-y-3">
+          <p className="text-base text-zinc-300">Inicia sesión para ver los cursos y el material publicado.</p>
+          <button type="button" onClick={() => openAuthModal('login')} className="text-base font-semibold text-zinc-100">
+            Iniciar sesión
+          </button>
+        </div>
+      ) : (
+        <>
+          {tab === 'courses' && (
+          <section className="space-y-3">
+            {visibleCourses.length === 0 ? (
+              <p className="text-sm text-zinc-500">
+                {universityFilter || subjectFilter || handle || needle
+                  ? 'Ningún curso coincide con esos filtros.'
+                  : 'Todavía no hay cursos públicos.'}
+              </p>
+            ) : (
+              <div className="grid gap-4 lg:grid-cols-2">
+                {visibleCourses.map(course => {
+                  const owner = course.members[course.ownerId]?.username;
+                  const meta = [course.subjectName, course.university, owner ? `@${owner}` : ''].filter(Boolean).join(' · ');
+                  return (
+                    <button
+                      key={course.code}
+                      type="button"
+                      onClick={() => openCourse(course.code)}
+                      className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 text-left"
+                    >
+                      <div
+                        className="relative min-h-36 p-5 flex flex-col justify-end"
+                        style={course.coverUrl
+                          ? { backgroundImage: `url(${course.coverUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+                          : { background: 'linear-gradient(135deg, #18181b 0%, #27272a 100%)' }}
+                      >
+                        <div className="absolute inset-0 bg-black/45" />
+                        <div className="relative">
+                          <p className="text-xl font-bold text-white">{course.name}</p>
+                          {meta && <p className="text-sm text-zinc-200 mt-1">{meta}</p>}
+                        </div>
+                      </div>
+                      {course.description && (
+                        <p className="px-5 py-4 text-base text-zinc-300 line-clamp-3">{course.description}</p>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+          )}
+
+          {tab === 'materials' && (
+          <section className="space-y-3">
+            {visibleMaterials.length === 0 ? (
+              <p className="text-sm text-zinc-500">
+                {universityFilter || subjectFilter || needle
+                  ? 'Ningún material coincide con esos filtros.'
+                  : 'Todavía no hay cuadernos ni juegos públicos.'}
+              </p>
+            ) : (
+              <div className="divide-y divide-zinc-800">
+                {visibleMaterials.map(item => (
+                  <button key={item.card.id} type="button" onClick={() => openMaterial(item)} className="w-full py-3 text-left space-y-1">
+                    <p className="text-base font-semibold text-zinc-100 flex items-center gap-2">
+                      {item.card.contentType === 'game'
+                        ? <Gamepad2 className="w-3.5 h-3.5 text-zinc-500" />
+                        : <BookOpen className="w-3.5 h-3.5 text-zinc-500" />}
+                      {item.card.title}
+                    </p>
+                    <p className="text-sm text-zinc-400">
+                      {item.card.contentType === 'game' ? 'Juego' : 'Cuaderno'}
+                      {item.card.authorUsername ? ` · @${item.card.authorUsername}` : ''}
+                      {item.courses.length > 0 ? ` · ${item.courses.map(course => course.name).join(', ')}` : ''}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+          )}
+        </>
+      )}
     </div>
   );
 };

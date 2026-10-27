@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
-import { useApp } from '../../context/AppContext';
+import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
+import { isNoteaAdmin, useApp } from '../../context/AppContext';
+import { storage } from '../../lib/firebase';
 import { 
   InteractiveBlock, 
   ContentType, 
@@ -7,14 +9,17 @@ import {
   StudyItemCard 
 } from '../../types';
 import { VISUAL_TEMPLATES } from '../../data/mockData';
+import { matchCatalogItem, sortedUniqueSubjects } from '../../utils/catalog';
+import { applyExpectedTime } from '../../utils/scoring';
+import { CatalogSearch } from '../common/CatalogSearch';
+import { ImageCropDialog } from '../common/ImageCropDialog';
+import { ImagePickDialog } from '../common/ImagePickDialog';
+import { AdminScriptPanel } from './AdminScriptPanel';
 import { InteractiveBlockEditor } from './blocks/InteractiveBlockEditors';
-import { InteractiveBlockPlayer } from './blocks/InteractiveBlockPlayer';
 import { 
   Save, 
   ArrowLeft, 
   Plus, 
-  Eye, 
-  Edit3, 
   Image as ImageIcon, 
   Palette, 
   Sparkles, 
@@ -34,7 +39,9 @@ export const NotebookEditor: React.FC = () => {
     addCard, 
     updateCard, 
     setCurrentView,
-    showToast
+    showToast,
+    universities,
+    subjects
   } = useApp();
 
   const editingCard = cards.find(c => c.id === editingCardId);
@@ -45,8 +52,12 @@ export const NotebookEditor: React.FC = () => {
   );
   const [title, setTitle] = useState(editingCard?.title || '');
   const [description, setDescription] = useState(editingCard?.description || '');
-  const [subjectName, setSubjectName] = useState(editingCard?.subjectName || user.enrolledSubjects[0] || 'Materia General');
-  const [semester, setSemester] = useState<number>(editingCard?.semester || user.currentSemester || 1);
+  const [visibility, setVisibility] = useState<'public' | 'private'>(
+    editingCard?.visibility === 'public' ? 'public' : 'private'
+  );
+  const catalogSubjects = sortedUniqueSubjects(subjects);
+  const [subjectName, setSubjectName] = useState(editingCard?.subjectName || '');
+  const [universityName, setUniversityName] = useState(editingCard?.universityName || '');
   const [accessCode, setAccessCode] = useState(
     editingCard?.accessCode || `${subjectName.slice(0, 4).toUpperCase().replace(/[^A-Z]/g, '') || 'NOTE'}-${Math.floor(10 + Math.random() * 90)}`
   );
@@ -58,8 +69,10 @@ export const NotebookEditor: React.FC = () => {
   const [coverValue, setCoverValue] = useState<string>(
     editingCard?.coverValue || VISUAL_TEMPLATES[0].value
   );
-  const [customCoverUrl, setCustomCoverUrl] = useState('');
   const [showCoverPicker, setShowCoverPicker] = useState(false);
+  const [coverPickerOpen, setCoverPickerOpen] = useState(false);
+  const [coverFile, setCoverFile] = useState<File | null>(null);
+  const [coverUploading, setCoverUploading] = useState(false);
 
   // Blocks array
   const [blocks, setBlocks] = useState<InteractiveBlock[]>(() => {
@@ -80,7 +93,7 @@ export const NotebookEditor: React.FC = () => {
   // Slash menu `/` and floating menu
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashSearch, setSlashSearch] = useState('');
-  const [previewMode, setPreviewMode] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Available block types filtered by contentType rule:
   // "En el Material de Estudio están disponibles absolutamente todas las opciones.
@@ -181,8 +194,8 @@ export const NotebookEditor: React.FC = () => {
           isSequential: false,
           imageUrl: 'https://images.unsplash.com/photo-1507413245164-6160d8298b31?auto=format&fit=crop&w=800&q=80',
           hotspots: [
-            { id: 'h1', label: 'Estructura 1', xPercent: 35, yPercent: 40, stepOrder: 1 },
-            { id: 'h2', label: 'Estructura 2', xPercent: 65, yPercent: 50, stepOrder: 2 }
+            { id: 'h1', label: 'Estructura 1', xPercent: 35, yPercent: 40, stepOrder: 1, radiusPercent: 8 },
+            { id: 'h2', label: 'Estructura 2', xPercent: 65, yPercent: 50, stepOrder: 2, radiusPercent: 8 }
           ]
         };
         break;
@@ -211,7 +224,11 @@ export const NotebookEditor: React.FC = () => {
         break;
     }
 
-    setBlocks([...blocks, newBlock]);
+    const gameUsesTime = contentType === 'game' && blocks.some(item => item.type !== 'content_card' && (item.estimatedTimeSeconds ?? 0) > 0);
+    const blockToAdd = gameUsesTime && newBlock.type !== 'content_card'
+      ? { ...newBlock, estimatedTimeSeconds: 30 }
+      : newBlock;
+    setBlocks([...blocks, blockToAdd]);
     setShowSlashMenu(false);
     setSlashSearch('');
   };
@@ -226,32 +243,105 @@ export const NotebookEditor: React.FC = () => {
     setBlocks(blocks.filter((_, i) => i !== index));
   };
 
-  const handleSave = () => {
+  const handleMoveBlock = (index: number, direction: 'up' | 'down') => {
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= blocks.length) return;
+    const next = [...blocks];
+    [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
+    setBlocks(next);
+  };
+
+  const expectsTime = contentType === 'game' && blocks.some(block => block.type !== 'content_card' && (block.estimatedTimeSeconds ?? 0) > 0);
+
+  const setExpectedTime = (enabled: boolean) => {
+    setBlocks(current => applyExpectedTime(current, enabled));
+  };
+
+  const handleSave = async () => {
+    if (isSaving) return;
+    setIsSaving(true);
     if (!title.trim()) {
       showToast('Por favor escribe un título para tu contenido.');
+      setIsSaving(false);
       return;
     }
+    const university = matchCatalogItem(universities, universityName);
+    const subject = matchCatalogItem(catalogSubjects, subjectName);
+    if (!university || !subject) {
+      const missing = !university && !subject
+        ? 'una universidad y una materia'
+        : !university ? 'una universidad' : 'una materia';
+      showToast(universities.length === 0
+        ? 'El catálogo todavía está cargando. Espera un momento y guarda otra vez.'
+        : `Elige ${missing} del catálogo.`);
+      setIsSaving(false);
+      return;
+    }
+
+    const timed = contentType === 'game' && blocks.some(block => block.type !== 'content_card' && (block.estimatedTimeSeconds ?? 0) > 0);
+    const blocksToSave = contentType === 'game' ? applyExpectedTime(blocks, timed) : blocks;
 
     const cardPayload = {
       title: title.trim(),
       description: description.trim() || 'Sin descripción.',
       contentType,
       accessCode: accessCode.trim().toUpperCase() || 'NOTE-99',
-      subjectName,
-      universityName: user.university,
-      semester,
+      subjectName: subject.name,
+      universityName: university.name,
+      semester: editingCard?.semester || 0,
       coverType,
       coverValue,
-      blocks
+      visibility,
+      blocks: blocksToSave,
     };
 
     if (editingCardId) {
-      updateCard(editingCardId, cardPayload);
+      await updateCard(editingCardId, cardPayload);
     } else {
-      addCard(cardPayload);
+      const savedCard = await addCard(cardPayload);
+      if (!savedCard) {
+        setIsSaving(false);
+        return;
+      }
     }
 
     setCurrentView('library');
+    setIsSaving(false);
+  };
+
+  const acceptCover = (file?: File) => {
+    if (!file) return;
+    const type = file.type === 'image/jpg' ? 'image/jpeg' : file.type;
+    if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(type)) {
+      showToast('Usa una foto JPG, PNG, WEBP o GIF.');
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      showToast('La foto debe pesar menos de 8 MB.');
+      return;
+    }
+    setCoverFile(file);
+  };
+
+  const confirmCover = async (file: File) => {
+    setCoverFile(null);
+    if (!user.id || user.isGuest) {
+      showToast('Entra con tu cuenta para subir la imagen.');
+      return;
+    }
+    setCoverUploading(true);
+    try {
+      const storageRef = ref(storage, `content/${user.id}/${Date.now()}_portada.jpg`);
+      const snapshot = await uploadBytes(storageRef, file, { contentType: 'image/jpeg' });
+      setCoverType('image');
+      setCoverValue(await getDownloadURL(snapshot.ref));
+      setShowCoverPicker(false);
+    } catch (error) {
+      console.error(error);
+      showToast('No se pudo subir la portada.');
+    } finally {
+      setCoverUploading(false);
+    }
   };
 
   return (
@@ -268,31 +358,43 @@ export const NotebookEditor: React.FC = () => {
         </button>
 
         <div className="flex items-center gap-2">
-          {/* Toggle Preview Mode */}
-          <button
-            type="button"
-            onClick={() => setPreviewMode(!previewMode)}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold border flex items-center gap-1.5 transition-all ${
-              previewMode 
-                ? 'bg-indigo-600 text-white border-indigo-500' 
-                : 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white'
-            }`}
-          >
-            {previewMode ? <Edit3 className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-            {previewMode ? 'Modo Editor' : 'Vista Previa'}
-          </button>
-
-          {/* Save Button */}
           <button
             type="button"
             onClick={handleSave}
+            disabled={isSaving}
             className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-lg shadow-indigo-600/25 flex items-center gap-1.5 transition-all"
           >
             <Save className="w-4 h-4" />
-            Guardar {contentType === 'material' ? 'Cuaderno' : 'Juego'}
+            {isSaving ? 'Guardando...' : `Guardar ${contentType === 'material' ? 'Cuaderno' : 'Juego'}`}
           </button>
         </div>
       </div>
+
+      {isNoteaAdmin(user) && (
+        <AdminScriptPanel
+          contentType={contentType}
+          title={title}
+          description={description}
+          university={universityName}
+          subject={subjectName}
+          blocks={blocks}
+          onApply={draft => {
+            if (draft.contentType) setContentType(draft.contentType);
+            if (draft.title) setTitle(draft.title);
+            if (draft.description) setDescription(draft.description);
+            if (draft.university) {
+              const match = matchCatalogItem(universities, draft.university);
+              setUniversityName(match?.name || draft.university);
+            }
+            if (draft.subject) {
+              const match = matchCatalogItem(catalogSubjects, draft.subject);
+              setSubjectName(match?.name || draft.subject);
+            }
+            setBlocks(draft.blocks);
+            showToast('Guion aplicado. Revísalo y guarda cuando quieras.');
+          }}
+        />
+      )}
 
       {/* Google Classroom Style Customizable Header Banner */}
       <div 
@@ -352,7 +454,7 @@ export const NotebookEditor: React.FC = () => {
         <div className="p-4 bg-zinc-900 border border-zinc-700 rounded-2xl space-y-4 animate-in fade-in duration-200">
           <div className="flex items-center justify-between">
             <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-              Elige tu Portada Personalizada (Colores, Gradientes o Imagen)
+              Elige un color o sube una foto
             </h4>
             <button
               type="button"
@@ -386,28 +488,28 @@ export const NotebookEditor: React.FC = () => {
             ))}
           </div>
 
-          {/* Custom Image Upload or URL */}
-          <div className="pt-2 border-t border-zinc-800 flex flex-col sm:flex-row gap-2">
-            <input
-              type="text"
-              value={customCoverUrl}
-              onChange={e => setCustomCoverUrl(e.target.value)}
-              placeholder="O pega una URL de imagen propia desde tu dispositivo..."
-              className="flex-1 px-3 py-1.5 bg-zinc-800 border border-zinc-700 rounded-xl text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
-            />
+          <div className="pt-2 border-t border-zinc-800 flex items-center gap-4">
             <button
               type="button"
-              onClick={() => {
-                if (customCoverUrl.trim()) {
-                  setCoverType('image');
-                  setCoverValue(customCoverUrl.trim());
-                  setShowCoverPicker(false);
-                }
-              }}
-              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl"
+              disabled={coverUploading}
+              onClick={() => setCoverPickerOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold rounded-xl"
             >
-              Aplicar Imagen
+              <ImageIcon className="w-3.5 h-3.5" />
+              {coverUploading ? 'Subiendo...' : coverType === 'image' ? 'Cambiar imagen' : 'Subir imagen'}
             </button>
+            {coverType === 'image' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setCoverType('gradient');
+                  setCoverValue(VISUAL_TEMPLATES[0].value);
+                }}
+                className="text-xs text-zinc-400 hover:text-rose-300"
+              >
+                Quitar imagen
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -437,40 +539,47 @@ export const NotebookEditor: React.FC = () => {
         </div>
 
         {/* Academic Details row */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-zinc-800/80">
-          <div>
-            <label className="text-[11px] font-semibold text-zinc-400 uppercase">Materia:</label>
-            <input
-              type="text"
-              value={subjectName}
-              onChange={e => setSubjectName(e.target.value)}
-              className="w-full mt-1 px-3 py-1.5 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-indigo-500"
-            />
-          </div>
-
-          <div>
-            <label className="text-[11px] font-semibold text-zinc-400 uppercase">Semestre:</label>
-            <select
-              value={semester}
-              onChange={e => setSemester(Number(e.target.value))}
-              className="w-full mt-1 px-3 py-1.5 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-indigo-500"
+        <div className="pt-2 border-t border-zinc-800/80 space-y-3">
+          <CatalogSearch
+            placeholder="Buscar universidad"
+            selected={universityName}
+            items={universities}
+            emptyLabel="No hay universidades con ese nombre."
+            onSelect={setUniversityName}
+            onClear={() => setUniversityName('')}
+          />
+          <CatalogSearch
+            placeholder="Buscar materia"
+            selected={subjectName}
+            items={catalogSubjects}
+            emptyLabel="No hay materias con ese nombre."
+            onSelect={setSubjectName}
+            onClear={() => setSubjectName('')}
+          />
+          <p className="text-xs text-zinc-500">
+            Código {editingCardId ? accessCode : 'se genera al guardar'}
+          </p>
+          <div className="flex gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => setVisibility('private')}
+              className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${visibility === 'private' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-200'}`}
             >
-              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(s => (
-                <option key={s} value={s}>{s}.° Semestre</option>
-              ))}
-            </select>
+              Privado
+            </button>
+            <button
+              type="button"
+              onClick={() => setVisibility('public')}
+              className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${visibility === 'public' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-200'}`}
+            >
+              Público
+            </button>
           </div>
-
-          <div>
-            <label className="text-[11px] font-semibold text-zinc-400 uppercase">Código Único (6 caracteres):</label>
-            <input
-              type="text"
-              value={accessCode}
-              maxLength={8}
-              onChange={e => setAccessCode(e.target.value.toUpperCase())}
-              className="w-full mt-1 px-3 py-1.5 bg-zinc-800 border border-zinc-700 rounded-lg text-xs font-mono font-bold text-indigo-400 focus:outline-none focus:border-indigo-500"
-            />
-          </div>
+          <p className="text-xs text-zinc-500">
+            {visibility === 'public'
+              ? 'Sale en Explorar. Cualquiera puede abrirlo.'
+              : 'Solo está en tu biblioteca y en los cursos donde lo publiques.'}
+          </p>
         </div>
       </div>
 
@@ -482,8 +591,7 @@ export const NotebookEditor: React.FC = () => {
             Bloques del Lienzo ({blocks.length})
           </h3>
 
-          {!previewMode && (
-            <button
+          <button
               type="button"
               onClick={() => setShowSlashMenu(true)}
               className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-indigo-400 hover:text-indigo-300 text-xs font-bold flex items-center gap-1.5 transition-colors"
@@ -491,21 +599,33 @@ export const NotebookEditor: React.FC = () => {
               <Plus className="w-3.5 h-3.5" />
               + Agregar Bloque o escribe /
             </button>
-          )}
         </div>
+        {contentType === 'game' && (
+          <label className="flex items-center gap-2 text-sm text-zinc-300">
+            <input
+              type="checkbox"
+              checked={expectsTime}
+              onChange={event => setExpectedTime(event.target.checked)}
+              className="accent-indigo-500"
+            />
+            Tiempos esperados
+            <span className="text-xs font-normal text-zinc-500">
+              {expectsTime ? 'Todos llevan tiempo, menos la tarjeta de contenido.' : 'Ningún bloque lleva tiempo.'}
+            </span>
+          </label>
+        )}
 
         {/* Render Blocks */}
         {blocks.map((block, index) => (
           <div key={block.id} className="relative group">
-            {previewMode ? (
-              <InteractiveBlockPlayer block={block} />
-            ) : (
-              <InteractiveBlockEditor
+            <InteractiveBlockEditor
                 block={block}
                 onChange={updated => handleUpdateBlock(index, updated)}
                 onDelete={() => handleDeleteBlock(index)}
+                onMove={direction => handleMoveBlock(index, direction)}
+                isGameContent={contentType === 'game'}
+                expectsTime={expectsTime}
               />
-            )}
           </div>
         ))}
 
@@ -579,6 +699,25 @@ export const NotebookEditor: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+      {coverPickerOpen && (
+        <ImagePickDialog
+          title="Subir portada"
+          onCancel={() => setCoverPickerOpen(false)}
+          onFile={file => {
+            setCoverPickerOpen(false);
+            acceptCover(file);
+          }}
+        />
+      )}
+      {coverFile && (
+        <ImageCropDialog
+          file={coverFile}
+          aspect={16 / 5}
+          title="Ajusta la portada"
+          onCancel={() => setCoverFile(null)}
+          onConfirm={file => { void confirmCover(file); }}
+        />
       )}
     </div>
   );

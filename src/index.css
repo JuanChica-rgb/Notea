@@ -1,6 +1,18 @@
 @import "tailwindcss";
 
 @layer base {
+  @media (min-width: 1024px) {
+    html {
+      font-size: 18px;
+    }
+  }
+
+  @media (min-width: 1440px) {
+    html {
+      font-size: 20px;
+    }
+  }
+
   body {
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
   }
@@ -13,6 +25,65 @@
     font-family: 'JetBrains Mono', monospace;
   }
 }
+
+.notea-math .katex {
+  color: inherit;
+  font-size: 1.05em;
+}
+
+.notea-math .katex-display {
+  margin: 0.4rem 0;
+}
+
+.notea-formula-source {
+  color: transparent !important;
+  caret-color: #fafafa;
+}
+
+.notea-formula-source.notea-formula-in-slot {
+  caret-color: transparent;
+}
+
+.notea-formula-overlay {
+  pointer-events: none;
+}
+
+.notea-formula-overlay .notea-math {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.notea-formula-btn .katex {
+  font-size: 1rem;
+  line-height: 1.1;
+}
+
+.notea-formula-btn .katex-display {
+  margin: 0;
+}
+
+html.light-mode,
+html.light-mode body {
+  background: #f4f6fb;
+  color: #172033;
+}
+
+html.light-mode .bg-zinc-950 { background-color: #f4f6fb !important; }
+html.light-mode .bg-zinc-900 { background-color: #ffffff !important; }
+html.light-mode .bg-zinc-800 { background-color: #e8edf5 !important; }
+html.light-mode .bg-zinc-950\/40,
+html.light-mode .bg-zinc-950\/50,
+html.light-mode .bg-zinc-950\/80 { background-color: rgb(244 246 251 / 0.9) !important; }
+html.light-mode .text-zinc-100 { color: #172033 !important; }
+html.light-mode .text-zinc-200 { color: #26334a !important; }
+html.light-mode .text-zinc-300 { color: #3c4b63 !important; }
+html.light-mode .text-zinc-400,
+html.light-mode .text-zinc-500 { color: #64748b !important; }
+html.light-mode .border-zinc-800,
+html.light-mode .border-zinc-700 { border-color: #d7deea !important; }
+html.light-mode input,
+html.light-mode textarea,
+html.light-mode select { color: #172033 !important; }
 
 /* 3D Flip Card Utilities */
 .perspective-1000 {

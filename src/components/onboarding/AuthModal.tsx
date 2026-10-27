@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { WhatsAppAvatar } from '../common/WhatsAppAvatar';
+import type { User } from '../../types';
 import { 
   Check, 
   AlertCircle, 
@@ -16,10 +16,49 @@ import {
   X
 } from 'lucide-react';
 
+import { createUserWithEmailAndPassword, sendEmailVerification, signInWithEmailAndPassword, signOut, updateProfile } from 'firebase/auth';
+import { collection, doc, getDocs, getDoc, query, setDoc, updateDoc, where } from 'firebase/firestore';
+import { auth, db } from '../../lib/firebase';
+import { INITIAL_USER } from '../../data/mockData';
+import { careersForUniversity, sortedUniqueSubjects } from '../../utils/catalog';
+import { isUsernameTaken, normalizeUsername } from '../../utils/username';
+import { toFirestoreUser } from '../../utils/userDoc';
+
+const withTimeout = <T,>(promise: Promise<T>, milliseconds: number): Promise<T> => {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      window.setTimeout(() => reject({ code: 'auth/timeout' }), milliseconds);
+    }),
+  ]);
+};
+
+const describeAuthError = (error: unknown, fallback: string) => {
+  const err = error as { code?: string; message?: string };
+  const code = err?.code || '';
+  if (code === 'auth/email-already-in-use') return 'Este correo ya está registrado. Inicia sesión o confirma el correo si aún no lo has hecho.';
+  if (code === 'auth/wrong-password' || code === 'auth/user-not-found' || code === 'auth/invalid-credential') {
+    return 'Correo o contraseña incorrectos.';
+  }
+  if (code === 'auth/timeout') return 'Firebase no respondió a tiempo. Revisa tu conexión y vuelve a intentarlo.';
+  if (code === 'auth/too-many-requests') return 'Demasiados intentos. Espera un momento y vuelve a intentarlo.';
+  if (code === 'auth/unauthorized-continue-uri' || code === 'auth/invalid-continue-uri') {
+    return 'No se pudo enviar el correo de confirmación por la URL de retorno. Tu cuenta sí se creó.';
+  }
+  if (code === 'permission-denied' || code === 'auth/insufficient-permission') {
+    return 'No hay permiso para completar el registro. Si el correo ya quedó creado, inicia sesión.';
+  }
+  if (code === 'auth/network-request-failed') return 'Sin conexión con Firebase. Revisa internet o el bloqueo de red.';
+  if (code) return `${fallback} (${code})`;
+  if (err?.message) return `${fallback} (${err.message})`;
+  return fallback;
+};
+
 export const AuthModal: React.FC = () => {
   const { 
     isAuthModalOpen, 
     setIsAuthModalOpen, 
+    authModalMode,
     setUser, 
     universities, 
     careers, 
@@ -29,7 +68,8 @@ export const AuthModal: React.FC = () => {
   } = useApp();
 
   // Step or mode
-  const [mode, setMode] = useState<'register' | 'login'>('register');
+  const [mode, setMode] = useState<'register' | 'login' | 'verify'>('login');
+  const [sessionOpen, setSessionOpen] = useState(false);
 
   // Form Fields
   const [fullName, setFullName] = useState('');
@@ -52,25 +92,57 @@ export const AuthModal: React.FC = () => {
   const [isOtherSubject, setIsOtherSubject] = useState(false);
   const [customSubject, setCustomSubject] = useState('');
 
-  // Privacy setting
-  const [isIncognito, setIsIncognito] = useState(false);
-
   // Errors state
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [usernameTaken, setUsernameTaken] = useState(false);
+
+  if (isAuthModalOpen && !sessionOpen) {
+    setSessionOpen(true);
+    setMode(authModalMode);
+    setAuthError(null);
+  } else if (!isAuthModalOpen && sessionOpen) {
+    setSessionOpen(false);
+  }
+
+  useEffect(() => {
+    if (!isAuthModalOpen || mode !== 'register') {
+      setUsernameTaken(false);
+      return;
+    }
+    const handle = normalizeUsername(username);
+    if (handle.length < 3) {
+      setUsernameTaken(false);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const taken = await isUsernameTaken(handle);
+        if (!cancelled) setUsernameTaken(taken);
+      } catch {
+        if (!cancelled) setUsernameTaken(false);
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [username, isAuthModalOpen, mode]);
 
   if (!isAuthModalOpen) return null;
 
-  // Filter careers based on chosen university
-  const availableCareers = careers.filter(c => c.universityId === selectedUnivId);
-
-  // Filter subjects based on chosen career & semester
-  const availableSubjects = subjects.filter(
-    s => s.careerId === selectedCareerId && s.semester === currentSemester
-  );
+  const availableCareers = careersForUniversity(careers, selectedUnivId);
+  const availableSubjects = sortedUniqueSubjects(subjects);
 
   // Validations
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
+
+    if (mode === 'verify') {
+      return true;
+    }
 
     if (mode === 'register') {
       if (!fullName.trim()) newErrors.fullName = 'El nombre completo es obligatorio.';
@@ -78,6 +150,8 @@ export const AuthModal: React.FC = () => {
         newErrors.username = 'El apodo/username es obligatorio.';
       } else if (username.length < 3) {
         newErrors.username = 'El username debe tener al menos 3 caracteres.';
+      } else if (usernameTaken) {
+        newErrors.username = 'Ese @ ya está en uso. Elige otro.';
       }
 
       // Strict email format validation (standard with @ and valid domain with dot)
@@ -132,6 +206,35 @@ export const AuthModal: React.FC = () => {
     return Object.keys(newErrors).length === 0;
   };
 
+  const handleResendVerification = async () => {
+    setAuthError(null);
+    if (!email.trim() || !password) {
+      setAuthError('Vuelve a iniciar sesión para reenviar el correo.');
+      setMode('login');
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const loginValue = email.trim().toLowerCase();
+      const userCredential = await withTimeout(
+        signInWithEmailAndPassword(auth, loginValue, password),
+        12000
+      );
+      await sendEmailVerification(userCredential.user);
+      await signOut(auth);
+      showToast('Te enviamos un nuevo correo de verificación. Revisa tu bandeja de entrada y el correo no deseado.');
+    } catch (error: any) {
+      const mensaje = describeAuthError(error, 'No se pudo reenviar el correo.');
+      if (error?.code === 'auth/wrong-password' || error?.code === 'auth/invalid-credential') {
+        setMode('login');
+      }
+      setAuthError(mensaje);
+      showToast(mensaje);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleSubjectToggle = (subjName: string) => {
     if (selectedSubjects.includes(subjName)) {
       setSelectedSubjects(selectedSubjects.filter(s => s !== subjName));
@@ -140,62 +243,179 @@ export const AuthModal: React.FC = () => {
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!validateForm()) return;
+    setAuthError(null);
+    if (!validateForm()) {
+      setAuthError('Completa los campos obligatorios para continuar.');
+      return;
+    }
+    setIsSubmitting(true);
 
-    if (mode === 'register') {
-      const finalUniversity = isOtherUniv
-        ? customUniv.trim()
-        : (universities.find(u => u.id === selectedUnivId)?.name || 'Universidad');
-
-      const finalCareer = isOtherCareer
-        ? customCareer.trim()
-        : (careers.find(c => c.id === selectedCareerId)?.name || 'Carrera');
-
-      const enrolled = [...selectedSubjects];
-      if (isOtherSubject && customSubject.trim()) {
-        enrolled.push(customSubject.trim());
+    try {
+      if (mode === 'verify') {
+        return;
       }
+      if (mode === 'register') {
+        const uniqueUsername = normalizeUsername(username);
+        try {
+          if (await isUsernameTaken(uniqueUsername)) {
+            setErrors(prev => ({ ...prev, username: 'Ese @ ya está en uso. Elige otro.' }));
+            setAuthError('Ese apodo ya pertenece a otra cuenta.');
+            setIsSubmitting(false);
+            return;
+          }
+        } catch (usernameError) {
+          console.warn('No se pudo validar el @ en Firestore:', usernameError);
+        }
 
-      // Critical Rule: Dispatches to Admin Pending Requests Queue WITHOUT blocking user registration
-      if (isOtherUniv && customUniv.trim()) {
-        submitPendingRequest('university', customUniv.trim());
-      }
-      if (isOtherCareer && customCareer.trim()) {
-        submitPendingRequest('career', customCareer.trim(), finalUniversity);
-      }
-      if (isOtherSubject && customSubject.trim()) {
-        submitPendingRequest('subject', customSubject.trim(), `${finalCareer} (Semestre ${currentSemester})`);
-      }
+        if (auth.currentUser) {
+          await signOut(auth);
+          setUser(INITIAL_USER);
+        }
 
-      // Automatic WhatsApp-style generic silhouette avatar (silueta de perfil gris)
-      setUser({
-        id: `usr_${Date.now()}`,
-        fullName: fullName.trim(),
-        username: username.trim().toLowerCase().replace(/\s+/g, '_'),
-        email: email.trim().toLowerCase(),
-        avatarUrl: '', // Default WhatsApp silhouette assigned automatically
-        bannerType: 'gradient',
-        bannerValue: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4338ca 100%)',
-        university: finalUniversity,
-        career: finalCareer,
-        currentSemester,
-        enrolledSubjects: enrolled.length > 0 ? enrolled : ['Materia General'],
-        isIncognito,
-        bio: '¡Hola! Soy estudiante en Notea aprendiendo con microaprendizaje gamificado.',
-        rpPoints: 100, // Initial welcome bonus
-        streakDays: 1,
-        role: 'user',
-        createdAt: new Date().toISOString().split('T')[0]
-      });
+        // 1. Crear el usuario real en Firebase Authentication
+        const userCredential = await withTimeout(
+          createUserWithEmailAndPassword(auth, email.trim(), password),
+          12000
+        );
+        const firebaseUser = userCredential.user;
 
-      showToast(`¡Bienvenido a Notea, @${username}! Registro completado exitosamente.`);
-      setIsAuthModalOpen(false);
-    } else {
-      // Login simulation
-      showToast('Sesión iniciada con éxito en Notea.');
-      setIsAuthModalOpen(false);
+        const finalUniversity = isOtherUniv
+          ? customUniv.trim()
+          : (universities.find(u => u.id === selectedUnivId)?.name || 'Universidad');
+
+        const finalCareer = isOtherCareer
+          ? customCareer.trim()
+          : (careers.find(c => c.id === selectedCareerId)?.name || 'Carrera');
+
+        const enrolled = [...selectedSubjects];
+        if (isOtherSubject && customSubject.trim()) {
+          enrolled.push(customSubject.trim());
+        }
+
+        // Enviar solicitudes pendientes si aplica
+        if (isOtherUniv && customUniv.trim()) {
+          submitPendingRequest('university', customUniv.trim());
+        }
+        if (isOtherCareer && customCareer.trim()) {
+          submitPendingRequest('career', customCareer.trim(), finalUniversity);
+        }
+        if (isOtherSubject && customSubject.trim()) {
+          submitPendingRequest('subject', customSubject.trim());
+        }
+
+        const newUserProfile: User = {
+          id: firebaseUser.uid,
+          fullName: fullName.trim(),
+          username: uniqueUsername,
+          email: email.trim().toLowerCase(),
+          avatarUrl: '',
+          bannerType: 'gradient',
+          bannerValue: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4338ca 100%)',
+          university: finalUniversity,
+          career: finalCareer,
+          currentSemester,
+          enrolledSubjects: enrolled.length > 0 ? enrolled : ['Materia General'],
+          isIncognito: false,
+          bio: '¡Hola! Soy estudiante en Notea aprendiendo con microaprendizaje gamificado.',
+          streakDays: 1,
+          role: 'user',
+          createdAt: new Date().toISOString().split('T')[0],
+          mustVerifyEmail: true,
+          emailVerified: false,
+        };
+
+        // 2. Guardar el perfil detallado del usuario en Firestore (en la colección 'users')
+        await withTimeout(setDoc(doc(db, 'users', firebaseUser.uid), toFirestoreUser(newUserProfile)), 12000);
+
+        try {
+          await updateProfile(firebaseUser, { displayName: fullName.trim() });
+          await sendEmailVerification(firebaseUser);
+        } catch (verifyError) {
+          console.error('Error al enviar correo de confirmación:', verifyError);
+          setAuthError(describeAuthError(verifyError, 'La cuenta se creó, pero no se pudo enviar el correo. Usa Reenviar.'));
+        }
+
+        await signOut(auth);
+        setUser(INITIAL_USER);
+        setMode('verify');
+        showToast('Te enviamos un correo de verificación. Confirma tu dirección para activar la cuenta.');
+
+      } else {
+        // 1. Iniciar sesión real con Firebase Auth
+        const loginValue = email.trim().toLowerCase();
+        let loginEmail = loginValue;
+
+        if (!loginValue.includes('@')) {
+          const usernameSnapshot = await withTimeout(
+            getDocs(query(collection(db, 'users'), where('username', '==', loginValue.replace(/^@+/, '')))),
+            12000
+          );
+
+          if (usernameSnapshot.empty) {
+            throw { code: 'auth/user-not-found' };
+          }
+
+          loginEmail = usernameSnapshot.docs[0].data().email;
+        }
+
+        const userCredential = await withTimeout(
+          signInWithEmailAndPassword(auth, loginEmail, password),
+          12000
+        );
+        await userCredential.user.reload();
+        let storedProfile: Partial<User> = {};
+
+        try {
+          const profileSnapshot = await withTimeout(
+            getDoc(doc(db, 'users', userCredential.user.uid)),
+            12000
+          );
+          if (profileSnapshot.exists()) {
+            storedProfile = profileSnapshot.data() as User;
+          }
+        } catch (profileError) {
+          console.warn('No se pudo cargar el perfil; se usará un perfil base:', profileError);
+        }
+
+        if (storedProfile.mustVerifyEmail && !userCredential.user.emailVerified) {
+          await signOut(auth);
+          setUser(INITIAL_USER);
+          setEmail(loginEmail);
+          setMode('verify');
+          setAuthError('Debes confirmar tu correo electrónico antes de iniciar sesión. Revisa tu bandeja de entrada y el correo no deseado.');
+          showToast('Tu cuenta todavía no está verificada.');
+          return;
+        }
+
+        if (userCredential.user.emailVerified && storedProfile.mustVerifyEmail) {
+          await updateDoc(doc(db, 'users', userCredential.user.uid), {
+            mustVerifyEmail: false,
+            emailVerified: true,
+          });
+          storedProfile = { ...storedProfile, mustVerifyEmail: false, emailVerified: true };
+        }
+
+        setUser({
+          ...INITIAL_USER,
+          ...storedProfile,
+          id: userCredential.user.uid,
+          email: userCredential.user.email || storedProfile.email || '',
+          fullName: storedProfile.fullName || userCredential.user.displayName || 'Completa tu perfil',
+          username: storedProfile.username || userCredential.user.email?.split('@')[0] || 'usuario',
+          isGuest: false,
+        });
+        showToast('Sesión iniciada con éxito en Notea.');
+        setIsAuthModalOpen(false);
+      }
+    } catch (error: any) {
+      console.error("Error en autenticación:", error);
+      const mensaje = describeAuthError(error, 'Ocurrió un error al autenticar.');
+      setAuthError(mensaje);
+      showToast(mensaje);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -216,25 +436,23 @@ export const AuthModal: React.FC = () => {
             Plataforma Notea
           </div>
           <h2 className="text-2xl sm:text-3xl font-bold font-display tracking-tight text-zinc-100">
-            {mode === 'register' ? 'Registro y Onboarding Académico' : 'Iniciar Sesión en Notea'}
+            {mode === 'verify'
+              ? 'Confirma tu correo electrónico'
+              : mode === 'register'
+                ? 'Registro y Onboarding Académico'
+                : 'Iniciar Sesión en Notea'}
           </h2>
           <p className="text-sm text-zinc-400 mt-1">
-            {mode === 'register' 
-              ? 'Únete a la comunidad de microaprendizaje, compite en salas y domina tus materias.' 
-              : 'Accede a tus cuadernos, juegos y progreso académico.'}
+            {mode === 'verify'
+              ? 'Te enviamos un mensaje de verificación. Debes confirmar tu dirección antes de acceder a la plataforma.'
+              : mode === 'register'
+                ? 'Únete a la comunidad de microaprendizaje, compite en salas y domina tus materias.'
+                : 'Accede a tus cuadernos, juegos y progreso académico.'}
           </p>
 
           {/* Toggle between Register and Login */}
+          {mode !== 'verify' && (
           <div className="flex p-1 bg-zinc-800/80 rounded-xl border border-zinc-700/60 max-w-xs mx-auto mt-4">
-            <button
-              type="button"
-              onClick={() => setMode('register')}
-              className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                mode === 'register' ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
-              }`}
-            >
-              Crear Cuenta
-            </button>
             <button
               type="button"
               onClick={() => setMode('login')}
@@ -242,25 +460,70 @@ export const AuthModal: React.FC = () => {
                 mode === 'login' ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
               }`}
             >
-              Ya tengo cuenta
+              Iniciar sesión
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('register')}
+              className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                mode === 'register' ? 'bg-indigo-600 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              Crear cuenta
             </button>
           </div>
+          )}
         </div>
 
+        {mode === 'verify' && (
+          <div className="space-y-5">
+            {authError && (
+              <div className="p-3 rounded-xl border border-rose-500/40 bg-rose-950/50 text-rose-300 text-xs font-semibold">
+                {authError}
+              </div>
+            )}
+            <div className="flex flex-col items-center text-center gap-3 p-5 rounded-2xl bg-zinc-800/50 border border-zinc-700">
+              <div className="w-12 h-12 rounded-full bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center">
+                <Mail className="w-6 h-6 text-indigo-400" />
+              </div>
+              <p className="text-sm text-zinc-200">
+                Enviamos un enlace de confirmación a <span className="font-semibold text-white">{email || 'tu correo'}</span>.
+                Ábrelo, confirma tu dirección y después inicia sesión.
+              </p>
+              <p className="text-xs text-zinc-400">
+                Si no lo encuentras, revisa correo no deseado o promociones. El enlace tiene vigencia limitada; puedes solicitar uno nuevo si expiró.
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={isSubmitting}
+              onClick={handleResendVerification}
+              className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white font-semibold text-sm rounded-xl"
+            >
+              {isSubmitting ? 'Reenviando...' : 'Reenviar correo de verificación'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthError(null);
+                setMode('login');
+              }}
+              className="w-full py-2.5 text-sm text-zinc-300 hover:text-white"
+            >
+              Ya confirmé, iniciar sesión
+            </button>
+          </div>
+        )}
+
+        {mode !== 'verify' && (
         <form onSubmit={handleSubmit} className="space-y-6">
+          {authError && (
+            <div className="p-3 rounded-xl border border-rose-500/40 bg-rose-950/50 text-rose-300 text-xs font-semibold">
+              {authError}
+            </div>
+          )}
           {mode === 'register' && (
             <>
-              {/* WhatsApp Avatar notice */}
-              <div className="flex items-center gap-4 p-4 rounded-xl bg-zinc-800/40 border border-zinc-800">
-                <WhatsAppAvatar size="lg" />
-                <div className="text-left">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">Avatar Genérico Automático</span>
-                  <p className="text-xs text-zinc-300 mt-0.5">
-                    Se asigna por defecto una silueta gris estilo WhatsApp. Podrás personalizarla o subir tu propia foto más adelante desde la vista de Perfil.
-                  </p>
-                </div>
-              </div>
-
               {/* Personal Info Grid */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
@@ -288,9 +551,16 @@ export const AuthModal: React.FC = () => {
                     value={username}
                     onChange={e => setUsername(e.target.value)}
                     placeholder="Ej. mateo_val"
-                    className="w-full px-3.5 py-2.5 bg-zinc-800 border border-zinc-700 rounded-xl text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                    className={`w-full px-3.5 py-2.5 bg-zinc-800 border rounded-xl text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 ${
+                      usernameTaken
+                        ? 'border-rose-500 focus:border-rose-500 focus:ring-rose-500'
+                        : 'border-zinc-700 focus:border-indigo-500 focus:ring-indigo-500'
+                    }`}
                   />
-                  <span className="text-[11px] text-zinc-400">Visible en salas multijugador y rankings públicos</span>
+                  <span className="text-[11px] text-zinc-400">Visible en salas y en el ranking de tus cursos. Debe ser único.</span>
+                  {usernameTaken && !errors.username && (
+                    <p className="text-xs text-rose-400 mt-1 flex items-center gap-1"><AlertCircle className="w-3 h-3"/>Ese @ ya está registrado.</p>
+                  )}
                   {errors.username && <p className="text-xs text-rose-400 mt-1 flex items-center gap-1"><AlertCircle className="w-3 h-3"/>{errors.username}</p>}
                 </div>
               </div>
@@ -423,10 +693,7 @@ export const AuthModal: React.FC = () => {
                     {!isOtherCareer ? (
                       <select
                         value={selectedCareerId}
-                        onChange={e => {
-                          setSelectedCareerId(e.target.value);
-                          setSelectedSubjects([]);
-                        }}
+                        onChange={e => setSelectedCareerId(e.target.value)}
                         disabled={!selectedUnivId && !isOtherUniv}
                         className="w-full px-3.5 py-2.5 bg-zinc-800 border border-zinc-700 rounded-xl text-sm text-zinc-100 disabled:opacity-50 focus:outline-none focus:border-indigo-500"
                       >
@@ -455,10 +722,7 @@ export const AuthModal: React.FC = () => {
                     <label className="text-xs font-medium text-zinc-300">Semestre Actual *</label>
                     <select
                       value={currentSemester}
-                      onChange={e => {
-                        setCurrentSemester(Number(e.target.value));
-                        setSelectedSubjects([]);
-                      }}
+                      onChange={e => setCurrentSemester(Number(e.target.value))}
                       className="w-full px-3.5 py-2.5 bg-zinc-800 border border-zinc-700 rounded-xl text-sm text-zinc-100 focus:outline-none focus:border-indigo-500"
                     >
                       {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(sem => (
@@ -475,7 +739,7 @@ export const AuthModal: React.FC = () => {
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
                       <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
-                      Materias del Semestre (Selecciona las que cursas) *
+                      Materias (elige cualquiera del catálogo) *
                     </label>
                     <button
                       type="button"
@@ -509,7 +773,7 @@ export const AuthModal: React.FC = () => {
                       })
                     ) : (
                       <p className="text-xs text-zinc-400 italic p-1">
-                        No hay materias pre-registradas para este semestre. Usa el botón "+ Agregar Materia (Opción Otra)" abajo.
+                        No hay materias oficiales todavía. Usa "+ Agregar Materia (Opción Otra)".
                       </p>
                     )}
 
@@ -533,35 +797,6 @@ export const AuthModal: React.FC = () => {
                 </div>
               </div>
 
-              {/* Ajustes de Cuenta: Modo Privado / Incógnito Toggle */}
-              <div className="pt-3 border-t border-zinc-800">
-                <div className="flex items-center justify-between p-3.5 bg-zinc-800/50 border border-zinc-700/60 rounded-xl">
-                  <div className="space-y-0.5">
-                    <span className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
-                      <Lock className="w-3.5 h-3.5 text-amber-400" />
-                      Modo Privado / Incógnito
-                    </span>
-                    <p className="text-[11px] text-zinc-400 max-w-sm">
-                      Oculta tu apodo y tus puntuaciones de todos los rankings públicos de la plataforma.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={isIncognito}
-                    onClick={() => setIsIncognito(!isIncognito)}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
-                      isIncognito ? 'bg-indigo-600' : 'bg-zinc-700'
-                    }`}
-                  >
-                    <span
-                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        isIncognito ? 'translate-x-6' : 'translate-x-1'
-                      }`}
-                    />
-                  </button>
-                </div>
-              </div>
             </>
           )}
 
@@ -576,6 +811,7 @@ export const AuthModal: React.FC = () => {
                   placeholder="ejemplo@universidad.edu.pe"
                   className="w-full px-3.5 py-2.5 bg-zinc-800 border border-zinc-700 rounded-xl text-sm text-zinc-100 focus:outline-none focus:border-indigo-500"
                 />
+                {errors.email && <p className="text-xs text-rose-400 mt-1">{errors.email}</p>}
               </div>
               <div>
                 <label className="block text-xs font-medium text-zinc-300 mb-1">Contraseña</label>
@@ -586,6 +822,7 @@ export const AuthModal: React.FC = () => {
                   placeholder="Tu contraseña"
                   className="w-full px-3.5 py-2.5 bg-zinc-800 border border-zinc-700 rounded-xl text-sm text-zinc-100 focus:outline-none focus:border-indigo-500"
                 />
+                {errors.password && <p className="text-xs text-rose-400 mt-1">{errors.password}</p>}
               </div>
               <p className="text-xs text-zinc-400 text-center">
                 ¿Olvidaste tu contraseña? Modo de demostración activo, puedes ingresar con tus credenciales habituales.
@@ -596,12 +833,14 @@ export const AuthModal: React.FC = () => {
           {/* Submit Button */}
           <button
             type="submit"
+            disabled={isSubmitting}
             className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-semibold text-sm rounded-xl shadow-lg shadow-indigo-600/25 transition-all flex items-center justify-center gap-2"
           >
             <Check className="w-4 h-4" />
-            {mode === 'register' ? 'Completar Registro en Notea' : 'Iniciar Sesión'}
+            {isSubmitting ? 'Verificando...' : mode === 'register' ? 'Completar Registro en Notea' : 'Iniciar Sesión'}
           </button>
         </form>
+        )}
       </div>
     </div>
   );

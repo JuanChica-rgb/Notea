@@ -1,0 +1,877 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: Firebase Auth uid
+    // Fields:
+    //   - id: string (optional copy of uid)
+    //   - fullName, username, email: string (required)
+    //   - avatarUrl, bannerType, bannerValue, university, career, bio: string
+    //   - currentSemester: number 1-10
+    //   - enrolledSubjects: list<string>
+    //   - isIncognito, isGuest, mustVerifyEmail, emailVerified: bool
+    //   - rpPoints, streakDays: number >= 0
+    //   - lastAccessDate, createdAt, updatedAt: string
+    //   - role: 'user' | 'admin' (immutable except admin)
+    //   - educatorKind: 'tutor' | 'professor'
+    //   - educatorUniversity: string
+    //   - educatorStatus: 'pending' | 'verified' (only admin can set verified)
+    //
+    // Collection: cards
+    // Document ID: generated / stable author-scoped id
+    // Fields: authorId (immutable owner), ratingsByUser map, folderId, ...
+    //
+    // Collection: folders
+    // Fields: name, color, ownerId
+    //
+    // Collections: universities, careers, subjects, categories, tournaments
+    // Admin-managed catalogs
+    //
+    // Collection: pendingRequests
+    // User-created suggestions; admin updates status
+    //
+    // Collection: gameSessions
+    // Authenticated players append scores
+    //
+    // Subcollection: users/{uid}/reviewBlocks/{cardAndBlock}
+    // Owner-only memory of which practice block was missed or answered.
+    // Fields: cardId, blockId, subjectName, wrongCount, correctCount,
+    //   lastCorrect, dueAt, updatedAt. Each write adds exactly one answer.
+    //
+    // Subcollection: courses/{code}/standings/{uid}
+    // Course members read the board. A member writes only their own row,
+    // one answered block at a time. Fields: userId, username, fullName,
+    //   isIncognito, attempts, correct, accuracyPercent, updatedAt.
+    //
+    // Collection: rooms
+    // Document ID: 4-character roomCode
+    // Fields: hostId, roomCode, gameId, gameTitle, maxPlayers 2-5, state,
+    //   totalBlocks, createdAt, optional startedAt, players map keyed by uid
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAccount() {
+      return isAuthenticated()
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'juanmiguel71293@gmail.com'
+        || (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid))
+          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+        )
+      );
+    }
+
+    function userAllowedKeys() {
+      return [
+        'id', 'fullName', 'username', 'email', 'avatarUrl', 'bannerType',
+        'bannerValue', 'university', 'career', 'currentSemester',
+        'enrolledSubjects', 'isIncognito', 'bio', 'rpPoints', 'streakDays',
+        'lastAccessDate', 'role', 'createdAt', 'updatedAt', 'isGuest',
+        'mustVerifyEmail', 'emailVerified'
+      ];
+    }
+
+    function optionalString(field, maxLen) {
+      return !(field in request.resource.data) ||
+        (request.resource.data[field] is string &&
+         request.resource.data[field].size() <= maxLen);
+    }
+
+    function optionalBool(field) {
+      return !(field in request.resource.data) ||
+        request.resource.data[field] is bool;
+    }
+
+    function optionalNumber(field) {
+      return !(field in request.resource.data) ||
+        (request.resource.data[field] is number &&
+         request.resource.data[field] >= 0);
+    }
+
+    function isValidUser() {
+      let data = request.resource.data;
+      return data.fullName is string
+        && data.fullName.size() >= 1
+        && data.fullName.size() <= 80
+        && data.username is string
+        && data.username.size() >= 3
+        && data.username.size() <= 40
+        && data.email is string
+        && data.email.size() <= 120
+        && optionalString('avatarUrl', 2000)
+        && optionalString('bannerType', 20)
+        && optionalString('bannerValue', 2000)
+        && optionalString('university', 120)
+        && optionalString('career', 120)
+        && optionalString('bio', 500)
+        && optionalString('lastAccessDate', 40)
+        && optionalString('createdAt', 40)
+        && optionalString('updatedAt', 40)
+        && optionalString('id', 128)
+        && optionalString('role', 16)
+        && optionalBool('isIncognito')
+        && optionalBool('isGuest')
+        && optionalBool('mustVerifyEmail')
+        && optionalBool('emailVerified')
+        && optionalNumber('rpPoints')
+        && optionalNumber('streakDays')
+        && (!('currentSemester' in data) ||
+            (data.currentSemester is number &&
+             data.currentSemester >= 1 &&
+             data.currentSemester <= 10))
+        && (!('enrolledSubjects' in data) ||
+            (data.enrolledSubjects is list &&
+             data.enrolledSubjects.size() <= 40))
+        && (!('educatorKind' in data) || data.educatorKind == 'tutor' || data.educatorKind == 'professor')
+        && optionalString('educatorUniversity', 120)
+        && (!('educatorStatus' in data) || data.educatorStatus == 'pending' || data.educatorStatus == 'verified');
+    }
+
+    function educatorStatusAllowed() {
+      return isAdmin()
+        || !('educatorStatus' in request.resource.data)
+        || request.resource.data.educatorStatus == 'pending'
+        || (
+          resource != null
+          && 'educatorStatus' in resource.data
+          && request.resource.data.educatorStatus == resource.data.educatorStatus
+        );
+    }
+
+    function isValidUserCreate() {
+      return request.resource.data.keys().hasOnly(userAllowedKeys())
+        && isValidUser()
+        && request.resource.data.role == 'user';
+    }
+
+    function roleNotElevated() {
+      return !('role' in request.resource.data)
+        || request.resource.data.role == 'user'
+        || (resource != null && request.resource.data.role == resource.data.role)
+        || isAdmin();
+    }
+
+    function isWhole(value, min, max) {
+      return value is number
+        && value >= min
+        && value <= max
+        && value == math.floor(value);
+    }
+
+    function isValidReviewBlock() {
+      let data = request.resource.data;
+      return data.keys().hasOnly([
+          'cardId', 'blockId', 'subjectName', 'wrongCount', 'correctCount',
+          'lastCorrect', 'dueAt', 'updatedAt'
+        ])
+        && data.cardId is string
+        && data.cardId.size() > 0
+        && data.cardId.size() <= 128
+        && data.blockId is string
+        && data.blockId.size() > 0
+        && data.blockId.size() <= 128
+        && data.subjectName is string
+        && data.subjectName.size() <= 120
+        && isWhole(data.wrongCount, 0, 100000)
+        && isWhole(data.correctCount, 0, 100000)
+        && data.lastCorrect is bool
+        && data.dueAt is string
+        && data.dueAt.size() > 0
+        && data.dueAt.size() <= 40
+        && data.updatedAt is string
+        && data.updatedAt.size() > 0
+        && data.updatedAt.size() <= 40
+        && (data.lastCorrect ? data.correctCount >= 1 : data.wrongCount >= 1);
+    }
+
+    function isReviewStep() {
+      let data = request.resource.data;
+      return isValidReviewBlock() && (
+        resource == null
+          ? (
+              data.lastCorrect
+                ? data.correctCount == 1 && data.wrongCount == 0
+                : data.wrongCount == 1 && data.correctCount == 0
+            )
+          : data.cardId == resource.data.cardId
+            && data.blockId == resource.data.blockId
+            && (
+              data.lastCorrect
+                ? data.correctCount == resource.data.correctCount + 1
+                  && data.wrongCount == resource.data.wrongCount
+                : data.wrongCount == resource.data.wrongCount + 1
+                  && data.correctCount == resource.data.correctCount
+            )
+      );
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) && isAccount() && isValidUserCreate();
+      allow update: if isAccount() && (isOwner(userId) || isAdmin())
+        && isValidUser()
+        && roleNotElevated()
+        && educatorStatusAllowed();
+      allow delete: if isAdmin();
+
+      match /reviewBlocks/{blockKey} {
+        allow read: if isOwner(userId);
+        allow create, update: if isAccount() && isOwner(userId) && isReviewStep();
+      }
+
+      match /favorites/{cardId} {
+        allow read, delete: if isAccount() && isOwner(userId);
+        allow create: if isAccount() && isOwner(userId)
+          && request.resource.data.keys().hasOnly(['createdAt'])
+          && request.resource.data.createdAt is string
+          && request.resource.data.createdAt.size() > 0
+          && request.resource.data.createdAt.size() <= 40;
+      }
+    }
+
+    match /cards/{cardId} {
+      allow read: if isAuthenticated();
+      allow create: if isAccount()
+        && request.resource.data.authorId == request.auth.uid;
+      allow update: if isAccount() && (
+        resource.data.authorId == request.auth.uid
+        || isAdmin()
+        || request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['ratingsByUser', 'rating', 'ratingsCount', 'ratingSum', 'folderId'])
+      );
+      allow delete: if isAccount() && (
+        resource.data.authorId == request.auth.uid || isAdmin()
+      );
+    }
+
+    match /folders/{folderId} {
+      allow read: if isAuthenticated();
+      allow create: if isAccount()
+        && request.resource.data.ownerId == request.auth.uid;
+      allow update, delete: if isAccount() && (
+        resource.data.ownerId == request.auth.uid || isAdmin()
+      );
+    }
+
+    match /universities/{id} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /careers/{id} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /subjects/{id} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /categories/{id} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /pendingRequests/{id} {
+      allow read: if isAuthenticated();
+      allow create: if isAccount();
+      allow update, delete: if isAdmin();
+    }
+
+    match /tournaments/{id} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /gameSessions/{id} {
+      allow read: if isAuthenticated();
+      allow create: if isAccount();
+      allow update, delete: if isAdmin();
+    }
+
+    // Collection: rooms
+    // Document ID: 4-character roomCode
+    // Fields: hostId, roomCode, gameId, gameTitle, maxPlayers, state, totalBlocks, createdAt, players map
+    function isValidRoom() {
+      let data = request.resource.data;
+      return data.hostId is string
+        && data.hostId.size() <= 128
+        && data.roomCode is string
+        && data.roomCode.size() == 4
+        && data.gameId is string
+        && data.gameId.size() <= 256
+        && data.gameTitle is string
+        && data.gameTitle.size() <= 500
+        && optionalString('name', 500)
+        && optionalString('format', 16)
+        && optionalString('createdAt', 80)
+        && optionalBool('isPrivate')
+        && data.courseCode is string
+        && data.courseCode.size() == 4
+        && data.closesAt is number
+        && data.maxPlayers is number
+        && data.maxPlayers >= 2
+        && data.maxPlayers <= 40
+        && data.state in ['lobby', 'playing', 'finished']
+        && data.totalBlocks is number
+        && data.totalBlocks >= 0
+        && data.totalBlocks <= 500
+        && data.players is map
+        && data.players.size() <= 40
+        && (!('startedAt' in data) || data.startedAt is number);
+    }
+
+    function isRoomMember() {
+      return isAuthenticated() && request.auth.uid in resource.data.players;
+    }
+
+    function isRoomHost() {
+      return isAuthenticated() && request.auth.uid == resource.data.hostId;
+    }
+
+    function isJoiningRoom() {
+      return isAuthenticated()
+        && resource.data.state == 'lobby'
+        && !(request.auth.uid in resource.data.players)
+        && request.auth.uid in request.resource.data.players
+        && request.resource.data.players.size() == resource.data.players.size() + 1
+        && request.resource.data.players.size() <= resource.data.maxPlayers
+        && request.resource.data.hostId == resource.data.hostId
+        && request.resource.data.roomCode == resource.data.roomCode;
+    }
+
+    function isCourseStaffOf(code) {
+      return isAccount() && (
+        courseDoc(code).ownerId == request.auth.uid
+        || (
+          request.auth.uid in courseDoc(code).members
+          && courseDoc(code).members[request.auth.uid].role == 'admin'
+        )
+      );
+    }
+
+    match /rooms/{roomId} {
+      allow read: if isAccount() && (
+        !('courseCode' in resource.data)
+        || isCourseMember(resource.data.courseCode)
+      );
+      allow create: if isAccount()
+        && request.resource.data.hostId == request.auth.uid
+        && request.resource.data.roomCode == roomId
+        && request.resource.data.state == 'lobby'
+        && request.auth.uid in request.resource.data.players
+        && request.resource.data.players.size() == 1
+        && request.resource.data.closesAt > request.time.toMillis()
+        && isValidRoom()
+        && isCourseStaffOf(request.resource.data.courseCode);
+      allow update: if isAuthenticated()
+        && request.resource.data.hostId == resource.data.hostId
+        && request.resource.data.roomCode == resource.data.roomCode
+        && request.resource.data.roomCode == roomId
+        && sameOptional('courseCode')
+        && sameOptional('closesAt')
+        && sameOptional('maxPlayers')
+        && sameOptional('gameId')
+        && (
+          isRoomHost()
+          || isRoomMember()
+          || (
+            isJoiningRoom()
+            && resource.data.courseCode is string
+            && request.time.toMillis() < resource.data.closesAt
+            && isCourseMember(resource.data.courseCode)
+          )
+        );
+      allow delete: if isRoomHost();
+    }
+
+    function courseDoc(code) {
+      return get(/databases/$(database)/documents/courses/$(code)).data;
+    }
+
+    function isCourseMember(code) {
+      return isAccount() && (
+        courseDoc(code).ownerId == request.auth.uid
+        || request.auth.uid in courseDoc(code).memberIds
+      );
+    }
+
+    function sameOptional(field) {
+      return (!(field in resource.data) && !(field in request.resource.data))
+        || (
+          field in resource.data
+          && field in request.resource.data
+          && request.resource.data[field] == resource.data[field]
+        );
+    }
+
+    function courseCoreUnchanged() {
+      return request.resource.data.name == resource.data.name
+        && request.resource.data.subjectName == resource.data.subjectName
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.code == resource.data.code
+        && request.resource.data.createdAt == resource.data.createdAt
+        && sameOptional('description')
+        && sameOptional('university')
+        && sameOptional('visibility')
+        && sameOptional('coverUrl');
+    }
+
+    function pendingUnchanged() {
+      return sameOptional('pendingIds') && sameOptional('pending');
+    }
+
+    function onlySelfMemberChanged() {
+      return request.resource.data.members.diff(resource.data.members).affectedKeys().hasOnly([request.auth.uid]);
+    }
+
+    function isJoiningCourse() {
+      return isAccount()
+        && resource.data.get('visibility', 'public') == 'public'
+        && !(request.auth.uid in resource.data.memberIds)
+        && request.resource.data.memberIds.hasAll(resource.data.memberIds)
+        && request.auth.uid in request.resource.data.memberIds
+        && request.resource.data.memberIds.size() == resource.data.memberIds.size() + 1
+        && request.resource.data.memberIds.size() <= 300
+        && request.auth.uid in request.resource.data.members
+        && request.resource.data.members.size() == resource.data.members.size() + 1
+        && onlySelfMemberChanged()
+        && pendingUnchanged()
+        && courseCoreUnchanged()
+        && isValidCourse(request.resource.data)
+        && isValidCourseMember(request.resource.data.members[request.auth.uid])
+        && request.resource.data.members[request.auth.uid].role == 'student';
+    }
+
+    function isLeavingCourse() {
+      return isAccount()
+        && resource.data.ownerId != request.auth.uid
+        && request.auth.uid in resource.data.memberIds
+        && resource.data.memberIds.hasAll(request.resource.data.memberIds)
+        && !(request.auth.uid in request.resource.data.memberIds)
+        && request.resource.data.memberIds.size() == resource.data.memberIds.size() - 1
+        && !(request.auth.uid in request.resource.data.members)
+        && request.resource.data.members.size() == resource.data.members.size() - 1
+        && onlySelfMemberChanged()
+        && pendingUnchanged()
+        && courseCoreUnchanged()
+        && isValidCourse(request.resource.data);
+    }
+
+    function isValidPending(person) {
+      return person is map
+        && person.keys().hasOnly(['id', 'username', 'fullName', 'requestedAt'])
+        && person.id == request.auth.uid
+        && person.username is string
+        && person.username.size() >= 1
+        && person.username.size() <= 40
+        && person.fullName is string
+        && person.fullName.size() <= 80
+        && person.requestedAt is string
+        && person.requestedAt.size() <= 80;
+    }
+
+    function isRequestingCourse() {
+      return isAccount()
+        && resource.data.visibility == 'private'
+        && !(request.auth.uid in resource.data.memberIds)
+        && !(request.auth.uid in resource.data.pendingIds)
+        && request.resource.data.memberIds == resource.data.memberIds
+        && request.resource.data.members == resource.data.members
+        && request.resource.data.pendingIds.hasAll(resource.data.pendingIds)
+        && request.auth.uid in request.resource.data.pendingIds
+        && request.resource.data.pendingIds.size() == resource.data.pendingIds.size() + 1
+        && request.resource.data.pendingIds.size() <= 100
+        && request.auth.uid in request.resource.data.pending
+        && request.resource.data.pending.size() == resource.data.pending.size() + 1
+        && request.resource.data.pending.diff(resource.data.pending).affectedKeys().hasOnly([request.auth.uid])
+        && isValidPending(request.resource.data.pending[request.auth.uid])
+        && courseCoreUnchanged()
+        && isValidCourse(request.resource.data);
+    }
+
+    function isCancelingRequest() {
+      return isAccount()
+        && request.auth.uid in resource.data.pendingIds
+        && !(request.auth.uid in resource.data.memberIds)
+        && resource.data.pendingIds.hasAll(request.resource.data.pendingIds)
+        && !(request.auth.uid in request.resource.data.pendingIds)
+        && request.resource.data.pendingIds.size() == resource.data.pendingIds.size() - 1
+        && !(request.auth.uid in request.resource.data.pending)
+        && request.resource.data.pending.size() == resource.data.pending.size() - 1
+        && request.resource.data.pending.diff(resource.data.pending).affectedKeys().hasOnly([request.auth.uid])
+        && request.resource.data.memberIds == resource.data.memberIds
+        && request.resource.data.members == resource.data.members
+        && courseCoreUnchanged()
+        && isValidCourse(request.resource.data);
+    }
+
+    function isCourseStaffHere() {
+      return isAccount() && (
+        resource.data.ownerId == request.auth.uid
+        || (
+          request.auth.uid in resource.data.members
+          && resource.data.members[request.auth.uid].role == 'admin'
+        )
+      );
+    }
+
+    function memberIdentitySame(personId) {
+      return request.resource.data.members[personId].id == resource.data.members[personId].id
+        && request.resource.data.members[personId].username == resource.data.members[personId].username
+        && request.resource.data.members[personId].fullName == resource.data.members[personId].fullName
+        && request.resource.data.members[personId].joinedAt == resource.data.members[personId].joinedAt;
+    }
+
+    function onlyInFirst(first, second) {
+      return first.size() > 0 && !(first[0] in second) ? first[0]
+        : first.size() > 1 && !(first[1] in second) ? first[1]
+        : first.size() > 2 && !(first[2] in second) ? first[2]
+        : first.size() > 3 && !(first[3] in second) ? first[3]
+        : first.size() > 4 && !(first[4] in second) ? first[4]
+        : first.size() > 5 && !(first[5] in second) ? first[5]
+        : first.size() > 6 && !(first[6] in second) ? first[6]
+        : first.size() > 7 && !(first[7] in second) ? first[7]
+        : first.size() > 8 && !(first[8] in second) ? first[8]
+        : first.size() > 9 && !(first[9] in second) ? first[9]
+        : first.size() > 10 && !(first[10] in second) ? first[10]
+        : first.size() > 11 && !(first[11] in second) ? first[11]
+        : first.size() > 12 && !(first[12] in second) ? first[12]
+        : first.size() > 13 && !(first[13] in second) ? first[13]
+        : first.size() > 14 && !(first[14] in second) ? first[14]
+        : first.size() > 15 && !(first[15] in second) ? first[15]
+        : first.size() > 16 && !(first[16] in second) ? first[16]
+        : first.size() > 17 && !(first[17] in second) ? first[17]
+        : first.size() > 18 && !(first[18] in second) ? first[18]
+        : first[19];
+    }
+
+    function isChangingStaffRole() {
+      let before = resource.data.get('adminIds', []);
+      let after = request.resource.data.get('adminIds', []);
+      let added = after.removeAll(before);
+      let removed = before.removeAll(after);
+      let promoting = added.size() == 1 && removed.size() == 0 && after.hasAll(before);
+      let demoting = removed.size() == 1 && added.size() == 0 && before.hasAll(after);
+      let personId = promoting ? onlyInFirst(after, before) : demoting ? onlyInFirst(before, after) : '';
+      return isAccount()
+        && resource.data.ownerId == request.auth.uid
+        && (promoting || demoting)
+        && personId != resource.data.ownerId
+        && personId in resource.data.memberIds
+        && personId in resource.data.members
+        && request.resource.data.memberIds == resource.data.memberIds
+        && request.resource.data.members.size() == resource.data.members.size()
+        && request.resource.data.members[resource.data.ownerId].role == 'owner'
+        && pendingUnchanged()
+        && courseCoreUnchanged()
+        && memberIdentitySame(personId)
+        && (
+          promoting
+            ? resource.data.members[personId].role == 'student'
+              && request.resource.data.members[personId].role == 'admin'
+            : resource.data.members[personId].role == 'admin'
+              && request.resource.data.members[personId].role == 'student'
+        )
+        && isValidCourse(request.resource.data);
+    }
+
+    function isRejectingRequest() {
+      return isCourseStaffHere()
+        && request.resource.data.memberIds == resource.data.memberIds
+        && request.resource.data.members == resource.data.members
+        && resource.data.pendingIds.hasAll(request.resource.data.pendingIds)
+        && request.resource.data.pendingIds.size() == resource.data.pendingIds.size() - 1
+        && request.resource.data.pending.size() == resource.data.pending.size() - 1
+        && request.resource.data.pending.diff(resource.data.pending).removedKeys().size() == 1
+        && request.resource.data.pending.diff(resource.data.pending).addedKeys().size() == 0
+        && courseCoreUnchanged()
+        && isValidCourse(request.resource.data);
+    }
+
+    function isApprovingCourse() {
+      let added = request.resource.data.memberIds.removeAll(resource.data.memberIds);
+      return isCourseStaffHere()
+        && resource.data.visibility == 'private'
+        && added.size() == 1
+        && added[0] in resource.data.pendingIds
+        && !(added[0] in request.resource.data.pendingIds)
+        && resource.data.pendingIds.hasAll(request.resource.data.pendingIds)
+        && request.resource.data.pendingIds.size() == resource.data.pendingIds.size() - 1
+        && request.resource.data.memberIds.hasAll(resource.data.memberIds)
+        && request.resource.data.memberIds.size() == resource.data.memberIds.size() + 1
+        && request.resource.data.memberIds.size() <= 300
+        && added[0] in request.resource.data.members
+        && !(added[0] in request.resource.data.pending)
+        && request.resource.data.members.size() == resource.data.members.size() + 1
+        && request.resource.data.pending.size() == resource.data.pending.size() - 1
+        && request.resource.data.members.diff(resource.data.members).affectedKeys().hasOnly(added)
+        && request.resource.data.pending.diff(resource.data.pending).affectedKeys().hasOnly(added)
+        && request.resource.data.members[added[0]].keys().hasOnly(['id', 'username', 'fullName', 'role', 'joinedAt'])
+        && request.resource.data.members[added[0]].id == added[0]
+        && request.resource.data.members[added[0]].role == 'student'
+        && request.resource.data.members[added[0]].username is string
+        && request.resource.data.members[added[0]].username.size() <= 40
+        && request.resource.data.members[added[0]].fullName is string
+        && request.resource.data.members[added[0]].fullName.size() <= 80
+        && request.resource.data.members[added[0]].joinedAt is string
+        && courseCoreUnchanged()
+        && isValidCourse(request.resource.data);
+    }
+
+    function isValidCourseMember(member) {
+      return member is map
+        && member.keys().hasOnly(['id', 'username', 'fullName', 'role', 'joinedAt'])
+        && member.id == request.auth.uid
+        && member.username is string
+        && member.username.size() >= 1
+        && member.username.size() <= 40
+        && member.fullName is string
+        && member.fullName.size() <= 80
+        && member.role in ['owner', 'student']
+        && member.joinedAt is string
+        && member.joinedAt.size() <= 80;
+    }
+
+    function isValidCourse(data) {
+      return data.keys().hasOnly(['code', 'name', 'description', 'subjectName', 'university', 'visibility', 'ownerId', 'createdAt', 'memberIds', 'members', 'pendingIds', 'pending', 'adminIds'])
+        && data.code is string
+        && data.code.size() == 4
+        && data.name is string
+        && data.name.size() >= 2
+        && data.name.size() <= 120
+        && data.subjectName is string
+        && data.subjectName.size() > 0
+        && data.subjectName.size() <= 120
+        && data.ownerId is string
+        && data.ownerId.size() > 0
+        && data.ownerId.size() <= 128
+        && data.createdAt is string
+        && data.createdAt.size() <= 80
+        && data.memberIds is list
+        && data.memberIds.size() >= 1
+        && data.memberIds.size() <= 300
+        && data.ownerId in data.memberIds
+        && data.members is map
+        && data.members.size() == data.memberIds.size()
+        && data.ownerId in data.members
+        && (!('description' in data) || (data.description is string && data.description.size() <= 500))
+        && (!('university' in data) || (data.university is string && data.university.size() <= 120))
+        && (!('visibility' in data) || data.visibility in ['public', 'private'])
+        && (!('pendingIds' in data) || (data.pendingIds is list && data.pendingIds.size() <= 100))
+        && (!('pending' in data) || data.pending is map)
+        && (!('pendingIds' in data) || !('pending' in data) || data.pending.size() == data.pendingIds.size())
+        && (!('coverUrl' in data) || (data.coverUrl is string && data.coverUrl.size() > 0 && data.coverUrl.size() <= 2000))
+        && (!('adminIds' in data) || (data.adminIds is list && data.adminIds.size() <= 20));
+    }
+
+    function isValidCourseCreate() {
+      return isValidCourse(request.resource.data)
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.memberIds.size() == 1
+        && request.resource.data.members.keys().hasOnly([request.auth.uid])
+        && isValidCourseMember(request.resource.data.members[request.auth.uid])
+        && request.resource.data.members[request.auth.uid].role == 'owner'
+        && request.resource.data.description is string
+        && request.resource.data.university is string
+        && request.resource.data.university.size() > 0
+        && request.resource.data.university.size() <= 120
+        && request.resource.data.visibility in ['public', 'private']
+        && request.resource.data.pendingIds.size() == 0
+        && request.resource.data.pending.size() == 0;
+    }
+
+    function isUpdatingCourseDetails() {
+      return isCourseStaffHere()
+        && request.resource.data.members == resource.data.members
+        && request.resource.data.get('adminIds', []) == resource.data.get('adminIds', [])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'description'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 2
+        && request.resource.data.name.size() <= 120
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 500;
+    }
+
+    function isUpdatingCourseCover() {
+      return isCourseStaffHere()
+        && request.resource.data.members == resource.data.members
+        && request.resource.data.get('adminIds', []) == resource.data.get('adminIds', [])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['coverUrl'])
+        && (
+          !('coverUrl' in request.resource.data)
+          || (
+            request.resource.data.coverUrl is string
+            && request.resource.data.coverUrl.size() > 0
+            && request.resource.data.coverUrl.size() <= 2000
+          )
+        );
+    }
+
+    function isValidCourseMessage(data) {
+      return data.authorId == request.auth.uid
+        && data.authorUsername is string
+        && data.authorUsername.size() > 0
+        && data.authorUsername.size() <= 40
+        && data.text is string
+        && data.text.size() > 0
+        && data.text.size() <= 2000
+        && data.createdAt is string
+        && data.createdAt.size() <= 80;
+    }
+
+    function isValidCoursePostAttachment(data) {
+      return (!('cardId' in data) || (data.cardId is string && data.cardId.size() > 0 && data.cardId.size() <= 128))
+        && (!('cardTitle' in data) || (data.cardTitle is string && data.cardTitle.size() <= 300))
+        && (!('cardContentType' in data) || data.cardContentType in ['material', 'game'])
+        && (
+          (!('fileUrl' in data) && !('fileName' in data) && !('fileContentType' in data))
+          || (
+            data.fileUrl is string
+            && data.fileUrl.size() > 0
+            && data.fileUrl.size() <= 2000
+            && data.fileName is string
+            && data.fileName.size() > 0
+            && data.fileName.size() <= 180
+            && data.fileContentType in ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf']
+          )
+        )
+        && (!('roomCode' in data) || (data.roomCode is string && data.roomCode.size() == 4))
+        && (!('closesAt' in data) || (data.closesAt is number && data.closesAt > 0))
+        && (
+          (!('roomCode' in data) && !('closesAt' in data))
+          || (
+            'roomCode' in data
+            && 'closesAt' in data
+            && data.cardContentType == 'game'
+            && 'cardId' in data
+          )
+        );
+    }
+
+    function isValidStanding(uid) {
+      let data = request.resource.data;
+      return data.keys().hasOnly([
+          'userId', 'username', 'fullName', 'isIncognito', 'attempts',
+          'correct', 'accuracyPercent', 'updatedAt'
+        ])
+        && data.userId == uid
+        && data.userId == request.auth.uid
+        && data.username is string
+        && data.username.size() >= 1
+        && data.username.size() <= 40
+        && data.fullName is string
+        && data.fullName.size() >= 1
+        && data.fullName.size() <= 80
+        && data.isIncognito is bool
+        && isWhole(data.attempts, 1, 100000)
+        && isWhole(data.correct, 0, 100000)
+        && data.correct <= data.attempts
+        && isWhole(data.accuracyPercent, 0, 100)
+        && data.accuracyPercent == math.round(data.correct * 100 / data.attempts)
+        && data.updatedAt is string
+        && data.updatedAt.size() > 0
+        && data.updatedAt.size() <= 40;
+    }
+
+    function isStandingStep(uid) {
+      let data = request.resource.data;
+      return isValidStanding(uid) && (
+        resource == null
+          ? data.attempts == 1 && data.correct <= 1
+          : data.attempts == resource.data.attempts + 1
+            && data.correct >= resource.data.correct
+            && data.correct <= resource.data.correct + 1
+            && data.userId == resource.data.userId
+      );
+    }
+
+    match /courses/{code} {
+      allow read: if isAccount();
+      allow create: if isAccount()
+        && request.resource.data.code == code
+        && isValidCourseCreate();
+      allow update: if isJoiningCourse() || isLeavingCourse() || isRequestingCourse() || isCancelingRequest() || isApprovingCourse() || isRejectingRequest() || isUpdatingCourseCover() || isUpdatingCourseDetails() || isChangingStaffRole();
+      allow delete: if isAccount() && resource.data.ownerId == request.auth.uid;
+
+      match /standings/{uid} {
+        allow read: if isCourseMember(code);
+        allow create, update: if isCourseMember(code)
+          && request.auth.uid == uid
+          && isStandingStep(uid);
+      }
+
+      match /posts/{postId} {
+        allow read: if isAccount() && (
+          isCourseMember(code)
+          || courseDoc(code).get('visibility', 'public') == 'public'
+        );
+        allow create: if isCourseStaffOf(code)
+          && isValidCourseMessage(request.resource.data)
+          && isValidCoursePostAttachment(request.resource.data)
+          && request.resource.data.keys().hasOnly(['authorId', 'authorUsername', 'text', 'createdAt', 'cardId', 'cardTitle', 'cardContentType', 'fileUrl', 'fileName', 'fileContentType', 'roomCode', 'closesAt']);
+        allow delete: if isCourseStaffOf(code);
+      }
+    }
+
+    function isValidCourseIndex(code) {
+      return request.resource.data.keys().hasOnly(['code', 'name', 'subjectName', 'ownerId', 'role'])
+        && request.resource.data.code == code
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 2
+        && request.resource.data.name.size() <= 120
+        && request.resource.data.subjectName is string
+        && request.resource.data.subjectName.size() > 0
+        && request.resource.data.subjectName.size() <= 120
+        && request.resource.data.ownerId is string
+        && request.resource.data.ownerId.size() > 0
+        && request.resource.data.ownerId.size() <= 128
+        && request.resource.data.role in ['owner', 'admin', 'student', 'pending'];
+    }
+
+    match /userCourses/{uid}/items/{code} {
+      allow read, delete: if isAccount() && request.auth.uid == uid;
+      allow create, update: if isAccount()
+        && request.auth.uid == uid
+        && exists(/databases/$(database)/documents/courses/$(code))
+        && isValidCourseIndex(code)
+        && (
+          (
+            request.resource.data.role == 'owner'
+            && courseDoc(code).ownerId == request.auth.uid
+            && request.auth.uid in courseDoc(code).memberIds
+          )
+          || (
+            request.resource.data.role == 'admin'
+            && request.auth.uid in courseDoc(code).memberIds
+            && courseDoc(code).members[request.auth.uid].role == 'admin'
+          )
+          || (
+            request.resource.data.role == 'student'
+            && request.auth.uid in courseDoc(code).memberIds
+          )
+          || (
+            request.resource.data.role == 'pending'
+            && courseDoc(code).get('visibility', 'public') == 'private'
+            && request.auth.uid in courseDoc(code).pendingIds
+          )
+        );
+    }
+  }
+}
